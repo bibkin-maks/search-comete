@@ -1,6 +1,15 @@
 """
 search-comete — pipeline/index.py
 Bulk-index processed papers into Elasticsearch.
+
+Canonical field names written to ES (Phase 1 schema unification):
+  cite        (was: citations)
+  cluster     (was: cluster_id)
+  color       (was: cluster_color)
+  x, y, z     (was: pos_x, pos_y, pos_z)
+
+Legacy aliases are no longer created. The Pydantic models in backend/models.py
+have validators that still accept old names for any existing index data.
 """
 import uuid
 import numpy as np
@@ -17,14 +26,14 @@ MAPPING = {
             "abstract":       {"type": "text"},
             "authors":        {"type": "text"},
             "year":           {"type": "integer"},
-            "citations":      {"type": "integer"},
+            "cite":           {"type": "integer"},         # canonical
             "venue":          {"type": "keyword"},
-            "cluster_id":     {"type": "keyword"},
+            "cluster":        {"type": "keyword"},         # canonical
             "cluster_label":  {"type": "keyword"},
-            "cluster_color":  {"type": "keyword"},
-            "pos_x":          {"type": "float"},
-            "pos_y":          {"type": "float"},
-            "pos_z":          {"type": "float"},
+            "color":          {"type": "keyword"},         # canonical
+            "x":              {"type": "float"},           # canonical
+            "y":              {"type": "float"},
+            "z":              {"type": "float"},
             "embedding": {
                 "type":       "dense_vector",
                 "dims":       EMBED_DIMS,
@@ -84,24 +93,25 @@ def build_docs(
     embeddings:    np.ndarray,
     coords_3d:     np.ndarray,
 ) -> list[dict]:
-    """Assemble Elasticsearch documents from all pipeline outputs."""
+    """Assemble Elasticsearch documents from all pipeline outputs.
+    Uses canonical field names so no remapping is needed downstream.
+    """
     docs = []
     for i, (paper, cl) in enumerate(zip(papers, cluster_infos)):
         docs.append({
             "id":            paper.get("paperId") or str(uuid.uuid4()),
             "title":         paper.get("title", ""),
             "abstract":      (paper.get("abstract") or "")[:2000],
-            # FIX: authors can be a string OR a list[dict] depending on source
             "authors":       _normalize_authors(paper.get("authors")),
             "year":          paper.get("year") or 0,
-            "citations":     paper.get("citationCount") or 0,
+            "cite":          paper.get("citationCount") or 0,   # canonical
             "venue":         paper.get("venue") or "",
-            "cluster_id":    cl["id"],
+            "cluster":       cl["id"],                           # canonical
             "cluster_label": cl["label"],
-            "cluster_color": cl["color"],
-            "pos_x":         float(coords_3d[i, 0]),
-            "pos_y":         float(coords_3d[i, 1]),
-            "pos_z":         float(coords_3d[i, 2]),
+            "color":         cl["color"],                        # canonical
+            "x":             float(coords_3d[i, 0]),             # canonical
+            "y":             float(coords_3d[i, 1]),
+            "z":             float(coords_3d[i, 2]),
             "embedding":     embeddings[i].tolist(),
         })
     return docs

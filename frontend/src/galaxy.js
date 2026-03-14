@@ -16,7 +16,9 @@
  */
 
 import * as THREE from 'three';
+import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import { showDetail } from './panel.js';
+import { update as sonicUpdate } from './sonification.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -50,7 +52,7 @@ function _spherePositions(n, radius = 22) {
   const positions = [], golden = (1 + Math.sqrt(5)) / 2;
   for (let i = 0; i < n; i++) {
     const theta = Math.acos(1 - 2 * (i + 0.5) / n);
-    const phi   = 2 * Math.PI * i / golden;
+    const phi = 2 * Math.PI * i / golden;
     positions.push(new THREE.Vector3(
       radius * Math.sin(theta) * Math.cos(phi),
       radius * Math.sin(theta) * Math.sin(phi),
@@ -68,7 +70,7 @@ function _discoverClusters(stars) {
   CLUSTER_ANCHORS = {};
   names.forEach((name, i) => {
     const key = String(name).toLowerCase().trim();
-    CLUSTER_COLORS[name]  = PREFERRED_COLORS[key] ?? AUTO_PALETTE[i % AUTO_PALETTE.length];
+    CLUSTER_COLORS[name] = PREFERRED_COLORS[key] ?? AUTO_PALETTE[i % AUTO_PALETTE.length];
     CLUSTER_ANCHORS[name] = positions[i];
   });
   console.log('[galaxy] Clusters discovered:', names);
@@ -85,6 +87,7 @@ function _normaliseCite(star) {
 // ── Module state ──────────────────────────────────────────────────────────────
 
 let renderer, scene, camera;
+let labelRenderer;    // CSS2D for Crucible labels
 let instancedSmall, instancedMed, instancedLarge;
 let instanceMapSmall = [], instanceMapMed = [], instanceMapLarge = [];
 let starDataArray = [];
@@ -93,20 +96,34 @@ let edgeSegments;
 let ringMesh, ringMat;
 let animFrame;
 
-const pivot       = new THREE.Vector3(0, 0, 0);
+// Animation state enum — drives _animateFloats() behaviour
+// Values: 'default' | 'time' | 'crucible'
+let _animState = 'default';
+
+// Time-mode state
+let _timeModeActive = false;
+let _timePosArray = null;   // Float32Array of year-mapped positions
+
+// Crucible state
+let _crucibleCluster = null;
+let _crucibleLabels = [];   // CSS2DObject instances
+let _lastClickTime = 0;
+let _lastClickCluster = null;
+
+const pivot = new THREE.Vector3(0, 0, 0);
 const pivotTarget = new THREE.Vector3(0, 0, 0);
-let camTheta = 0, camPhi = 1.3,  camR = 85;
+let camTheta = 0, camPhi = 1.3, camR = 85;
 let tgtTheta = 0, tgtPhi = 1.3, tgtR = 85;
 
 let isDragging = false, lastMX = 0, lastMY = 0, mouseMoved = false;
 let autoRotate = true;
-const mouse2D  = new THREE.Vector2();
+const mouse2D = new THREE.Vector2();
 const raycaster = new THREE.Raycaster();
 let hoveredStarIdx = -1;
 let lastRaycast = 0;
 
-const dummy       = new THREE.Object3D();
-const _col        = new THREE.Color();
+const dummy = new THREE.Object3D();
+const _col = new THREE.Color();
 const _floatDummy = new THREE.Object3D();
 
 const _remappedPos = {};
@@ -138,6 +155,18 @@ export function initGalaxy(canvas, stars) {
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
   renderer.setClearColor(0x06060f, 1);
+  renderer.xr = renderer.xr; // already exists on WebGLRenderer
+
+  // CSS2D overlay for Crucible labels
+  labelRenderer = new CSS2DRenderer();
+  labelRenderer.setSize(innerWidth, innerHeight);
+  labelRenderer.domElement.style.cssText =
+    'position:fixed;top:0;left:0;pointer-events:none;z-index:5;';
+  document.body.appendChild(labelRenderer.domElement);
+
+  window.addEventListener('resize', () => {
+    labelRenderer.setSize(innerWidth, innerHeight);
+  });
 
   scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0x06060f, 0.002);
@@ -182,19 +211,19 @@ function _remapStars(stars) {
   const out = [];
   Object.entries(groups).forEach(([cluster, members]) => {
     const anchor = CLUSTER_ANCHORS[cluster] || new THREE.Vector3(0, 0, 0);
-    let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity,z0=Infinity,z1=-Infinity;
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
     members.forEach(s => {
-      x0=Math.min(x0,s.x||0); x1=Math.max(x1,s.x||0);
-      y0=Math.min(y0,s.y||0); y1=Math.max(y1,s.y||0);
-      z0=Math.min(z0,s.z||0); z1=Math.max(z1,s.z||0);
+      x0 = Math.min(x0, s.x || 0); x1 = Math.max(x1, s.x || 0);
+      y0 = Math.min(y0, s.y || 0); y1 = Math.max(y1, s.y || 0);
+      z0 = Math.min(z0, s.z || 0); z1 = Math.max(z1, s.z || 0);
     });
-    const rx=(x1-x0)||1, ry=(y1-y0)||1, rz=(z1-z0)||1, R=4;
+    const rx = (x1 - x0) || 1, ry = (y1 - y0) || 1, rz = (z1 - z0) || 1, R = 4;
     members.forEach(s => {
       out.push({
         ...s,
-        x: anchor.x + (((s.x||0)-x0)/rx - 0.5) * R*2,
-        y: anchor.y + (((s.y||0)-y0)/ry - 0.5) * R*2,
-        z: anchor.z + (((s.z||0)-z0)/rz - 0.5) * R*2,
+        x: anchor.x + (((s.x || 0) - x0) / rx - 0.5) * R * 2,
+        y: anchor.y + (((s.y || 0) - y0) / ry - 0.5) * R * 2,
+        z: anchor.z + (((s.z || 0) - z0) / rz - 0.5) * R * 2,
       });
     });
   });
@@ -210,7 +239,7 @@ export function highlightStars(ids) {
     _col.setHex(hit ? 0xffffff : (CLUSTER_COLORS[star.cluster] || DEFAULT_COLOR));
     tierMesh.setColorAt(localId, _col);
     const b = basePosArray;
-    dummy.position.set(b[globalIdx*3], b[globalIdx*3+1], b[globalIdx*3+2]);
+    dummy.position.set(b[globalIdx * 3], b[globalIdx * 3 + 1], b[globalIdx * 3 + 2]);
     dummy.quaternion.identity();
     dummy.scale.setScalar(hit ? 2.2 : 0.01);
     dummy.updateMatrix();
@@ -225,7 +254,7 @@ export function clearHighlights() {
     _col.setHex(CLUSTER_COLORS[star.cluster] || DEFAULT_COLOR);
     tierMesh.setColorAt(localId, _col);
     const b = basePosArray;
-    dummy.position.set(b[globalIdx*3], b[globalIdx*3+1], b[globalIdx*3+2]);
+    dummy.position.set(b[globalIdx * 3], b[globalIdx * 3 + 1], b[globalIdx * 3 + 2]);
     dummy.quaternion.identity();
     dummy.scale.setScalar(1);
     dummy.updateMatrix();
@@ -244,7 +273,7 @@ export function filterCluster(clusterId) {
     if (edgeSegments) edgeSegments.material.opacity = 0.45;
     starDataArray.forEach(({ tierMesh, localId, globalIdx }) => {
       const b = basePosArray;
-      dummy.position.set(b[globalIdx*3], b[globalIdx*3+1], b[globalIdx*3+2]);
+      dummy.position.set(b[globalIdx * 3], b[globalIdx * 3 + 1], b[globalIdx * 3 + 2]);
       dummy.quaternion.identity();
       dummy.scale.setScalar(1);
       dummy.updateMatrix();
@@ -257,7 +286,7 @@ export function filterCluster(clusterId) {
   starDataArray.forEach(({ star, tierMesh, localId, globalIdx }) => {
     const match = star.cluster === clusterId;
     const b = basePosArray;
-    dummy.position.set(b[globalIdx*3], b[globalIdx*3+1], b[globalIdx*3+2]);
+    dummy.position.set(b[globalIdx * 3], b[globalIdx * 3 + 1], b[globalIdx * 3 + 2]);
     dummy.quaternion.identity();
     dummy.scale.setScalar(match ? 1.2 : 0.01);
     dummy.updateMatrix();
@@ -271,7 +300,7 @@ export function filterCluster(clusterId) {
     pivotTarget.copy(anchor);
     const dir = anchor.clone().normalize();
     tgtTheta = Math.atan2(dir.x, dir.z) + 0.3;
-    tgtPhi   = Math.acos(Math.max(-1, Math.min(1, dir.y))) * 0.8 + 0.3;
+    tgtPhi = Math.acos(Math.max(-1, Math.min(1, dir.y))) * 0.8 + 0.3;
     tgtR = 12;
     _warp();
   }
@@ -288,7 +317,7 @@ export function flyToCluster({ x, y, z }) {
   tgtR = 10;
   const dir = new THREE.Vector3(x, y, z).normalize();
   tgtTheta = Math.atan2(dir.x, dir.z) + 0.4;
-  tgtPhi   = Math.acos(Math.max(-1, Math.min(1, dir.y))) * 0.8 + 0.35;
+  tgtPhi = Math.acos(Math.max(-1, Math.min(1, dir.y))) * 0.8 + 0.35;
   _warp();
 }
 
@@ -303,9 +332,9 @@ function _buildBackground() {
   const count = 8000;
   const pos = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) {
-    pos[i*3]   = (Math.random()-0.5)*400;
-    pos[i*3+1] = (Math.random()-0.5)*400;
-    pos[i*3+2] = (Math.random()-0.5)*400;
+    pos[i * 3] = (Math.random() - 0.5) * 400;
+    pos[i * 3 + 1] = (Math.random() - 0.5) * 400;
+    pos[i * 3 + 2] = (Math.random() - 0.5) * 400;
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -330,12 +359,12 @@ function _makeNebula(color, size, anchor) {
   const cvs = document.createElement('canvas');
   cvs.width = cvs.height = 256;
   const ctx = cvs.getContext('2d');
-  const r=(color>>16)&255, g=(color>>8)&255, b=color&255;
-  const gr = ctx.createRadialGradient(128,128,0,128,128,128);
-  gr.addColorStop(0,   `rgba(${r},${g},${b},0.20)`);
+  const r = (color >> 16) & 255, g = (color >> 8) & 255, b = color & 255;
+  const gr = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+  gr.addColorStop(0, `rgba(${r},${g},${b},0.20)`);
   gr.addColorStop(0.4, `rgba(${r},${g},${b},0.07)`);
-  gr.addColorStop(1,   'rgba(0,0,0,0)');
-  ctx.fillStyle = gr; ctx.fillRect(0,0,256,256);
+  gr.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = gr; ctx.fillRect(0, 0, 256, 256);
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({
     map: new THREE.CanvasTexture(cvs), transparent: true,
     depthWrite: false, blending: THREE.AdditiveBlending,
@@ -348,13 +377,13 @@ function _makeNebula(color, size, anchor) {
 function _makeStarTex() {
   const sz = 64, c = document.createElement('canvas');
   c.width = c.height = sz;
-  const ctx = c.getContext('2d'), h = sz/2;
-  const g = ctx.createRadialGradient(h,h,0,h,h,h);
-  g.addColorStop(0,   'rgba(255,255,255,1)');
+  const ctx = c.getContext('2d'), h = sz / 2;
+  const g = ctx.createRadialGradient(h, h, 0, h, h, h);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
   g.addColorStop(0.2, 'rgba(255,255,255,0.6)');
   g.addColorStop(0.5, 'rgba(255,255,255,0.15)');
-  g.addColorStop(1,   'rgba(255,255,255,0)');
-  ctx.fillStyle = g; ctx.fillRect(0,0,sz,sz);
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, sz, sz);
   return new THREE.CanvasTexture(c);
 }
 
@@ -372,9 +401,9 @@ function _buildStars(stars) {
 
   // Always create all three meshes with at least 1 slot to avoid null references.
   // Extra slots beyond actual count are harmless — they'll have scale(0).
-  instancedSmall = new THREE.InstancedMesh(new THREE.SphereGeometry(0.07, 7, 7),  mat(), Math.max(1, cntS));
-  instancedMed   = new THREE.InstancedMesh(new THREE.SphereGeometry(0.13, 8, 8),  mat(), Math.max(1, cntM));
-  instancedLarge = new THREE.InstancedMesh(new THREE.SphereGeometry(0.22, 9, 9),  mat(), Math.max(1, cntL));
+  instancedSmall = new THREE.InstancedMesh(new THREE.SphereGeometry(0.07, 7, 7), mat(), Math.max(1, cntS));
+  instancedMed = new THREE.InstancedMesh(new THREE.SphereGeometry(0.13, 8, 8), mat(), Math.max(1, cntM));
+  instancedLarge = new THREE.InstancedMesh(new THREE.SphereGeometry(0.22, 9, 9), mat(), Math.max(1, cntL));
 
   [instancedSmall, instancedMed, instancedLarge].forEach(im => {
     im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -388,7 +417,7 @@ function _buildStars(stars) {
     }
   });
 
-  let iS=0, iM=0, iL=0;
+  let iS = 0, iM = 0, iL = 0;
   basePosArray = new Float32Array(stars.length * 3);
 
   const glowByCluster = {};
@@ -401,16 +430,16 @@ function _buildStars(stars) {
     dummy.scale.setScalar(1);
     dummy.updateMatrix();
 
-    basePosArray[gi*3]   = star.x;
-    basePosArray[gi*3+1] = star.y;
-    basePosArray[gi*3+2] = star.z;
+    basePosArray[gi * 3] = star.x;
+    basePosArray[gi * 3 + 1] = star.y;
+    basePosArray[gi * 3 + 2] = star.z;
 
     // FIX 2: assign tier — if cite=0 (all live API papers), all go to small.
     // That is intentional and correct.
     let tierMesh, localId;
-    if (cite > 5000)      { tierMesh = instancedLarge; localId = iL++; }
-    else if (cite > 200)  { tierMesh = instancedMed;   localId = iM++; }
-    else                  { tierMesh = instancedSmall;  localId = iS++; }
+    if (cite > 5000) { tierMesh = instancedLarge; localId = iL++; }
+    else if (cite > 200) { tierMesh = instancedMed; localId = iM++; }
+    else { tierMesh = instancedSmall; localId = iS++; }
 
     tierMesh.setMatrixAt(localId, dummy.matrix);
     tierMesh.setColorAt(localId, _col);
@@ -423,7 +452,7 @@ function _buildStars(stars) {
 
   _flushAll();
   instanceMapSmall = starDataArray.filter(e => e.tierMesh === instancedSmall);
-  instanceMapMed   = starDataArray.filter(e => e.tierMesh === instancedMed);
+  instanceMapMed = starDataArray.filter(e => e.tierMesh === instancedMed);
   instanceMapLarge = starDataArray.filter(e => e.tierMesh === instancedLarge);
   [instancedSmall, instancedMed, instancedLarge].forEach(im => scene.add(im));
 
@@ -465,11 +494,11 @@ function _buildEdges(stars) {
       for (let b = 0; b < members.length; b++) {
         if (b === a) continue;
         const sb = members[b];
-        const dx=sa.x-sb.x, dy=sa.y-sb.y, dz=sa.z-sb.z;
-        dists.push({ b, d: Math.sqrt(dx*dx+dy*dy+dz*dz) });
+        const dx = sa.x - sb.x, dy = sa.y - sb.y, dz = sa.z - sb.z;
+        dists.push({ b, d: Math.sqrt(dx * dx + dy * dy + dz * dz) });
       }
-      dists.sort((x,y) => x.d - y.d);
-      const maxD = dists[Math.min(K-1, dists.length-1)].d;
+      dists.sort((x, y) => x.d - y.d);
+      const maxD = dists[Math.min(K - 1, dists.length - 1)].d;
 
       for (let k = 0; k < Math.min(K, dists.length); k++) {
         const { b, d } = dists[k];
@@ -478,8 +507,8 @@ function _buildEdges(stars) {
         added.add(key);
         const sb = members[b];
         const br = Math.max(0.1, 1 - d / (maxD * 2));
-        positions.push(sa.x,sa.y,sa.z, sb.x,sb.y,sb.z);
-        colors.push(col.r*br,col.g*br,col.b*br, col.r*br,col.g*br,col.b*br);
+        positions.push(sa.x, sa.y, sa.z, sb.x, sb.y, sb.z);
+        colors.push(col.r * br, col.g * br, col.b * br, col.r * br, col.g * br, col.b * br);
       }
     });
   });
@@ -487,7 +516,7 @@ function _buildEdges(stars) {
   if (!positions.length) return;
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geo.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   edgeSegments = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
     vertexColors: true, transparent: true, opacity: 0.5,
     depthWrite: false, blending: THREE.AdditiveBlending,
@@ -498,17 +527,17 @@ function _buildEdges(stars) {
 function _buildInterClusterLines(stars) {
   const c = {};
   stars.forEach(s => {
-    if (!c[s.cluster]) c[s.cluster] = {x:0,y:0,z:0,n:0};
-    c[s.cluster].x+=s.x; c[s.cluster].y+=s.y; c[s.cluster].z+=s.z; c[s.cluster].n++;
+    if (!c[s.cluster]) c[s.cluster] = { x: 0, y: 0, z: 0, n: 0 };
+    c[s.cluster].x += s.x; c[s.cluster].y += s.y; c[s.cluster].z += s.z; c[s.cluster].n++;
   });
   const ids = Object.keys(c);
   const pts = {};
-  ids.forEach(id => { pts[id] = new THREE.Vector3(c[id].x/c[id].n, c[id].y/c[id].n, c[id].z/c[id].n); });
+  ids.forEach(id => { pts[id] = new THREE.Vector3(c[id].x / c[id].n, c[id].y / c[id].n, c[id].z / c[id].n); });
   const pos = [];
-  for (let a=0; a<ids.length; a++)
-    for (let b=a+1; b<ids.length; b++) {
-      const pa=pts[ids[a]], pb=pts[ids[b]];
-      pos.push(pa.x,pa.y,pa.z, pb.x,pb.y,pb.z);
+  for (let a = 0; a < ids.length; a++)
+    for (let b = a + 1; b < ids.length; b++) {
+      const pa = pts[ids[a]], pb = pts[ids[b]];
+      pos.push(pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
     }
   if (!pos.length) return;
   const geo = new THREE.BufferGeometry();
@@ -544,10 +573,10 @@ function _bindControls(canvas) {
       const dx = e.clientX - lastMX, dy = e.clientY - lastMY;
       if (Math.abs(dx) > 2 || Math.abs(dy) > 2) mouseMoved = true;
       tgtTheta -= dx * 0.005;
-      tgtPhi    = Math.max(0.15, Math.min(Math.PI-0.15, tgtPhi - dy * 0.004));
+      tgtPhi = Math.max(0.15, Math.min(Math.PI - 0.15, tgtPhi - dy * 0.004));
       lastMX = e.clientX; lastMY = e.clientY;
     }
-    mouse2D.x =  (e.clientX / innerWidth)  * 2 - 1;
+    mouse2D.x = (e.clientX / innerWidth) * 2 - 1;
     mouse2D.y = -(e.clientY / innerHeight) * 2 + 1;
   });
 
@@ -557,7 +586,24 @@ function _bindControls(canvas) {
     setTimeout(() => { autoRotate = true; }, 5000);
   }, { passive: true });
 
-  canvas.addEventListener('click', () => { if (!mouseMoved) _handleClick(); });
+  // Double-click detection for Crucible
+  canvas.addEventListener('click', () => {
+    if (!mouseMoved) {
+      const now = performance.now();
+      _handleClick();
+      // Double-click: same cluster within 400ms
+      const hit = _castAgainstInstances();
+      if (hit) {
+        if (_lastClickCluster === hit.star.cluster && now - _lastClickTime < 400) {
+          enterCrucible(hit.star.cluster);
+        }
+        _lastClickCluster = hit.star.cluster;
+        _lastClickTime = now;
+      }
+    }
+  });
+
+  window.addEventListener('keydown', e => { if (e.key === 'Escape') exitCrucible(); });
 
   window.addEventListener('resize', () => {
     camera.aspect = innerWidth / innerHeight;
@@ -575,7 +621,7 @@ function _bindControls(canvas) {
     } else if (e.touches.length === 2) {
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
-      lastTouchDist = Math.sqrt(dx*dx + dy*dy);
+      lastTouchDist = Math.sqrt(dx * dx + dy * dy);
     }
   }, { passive: true });
 
@@ -585,12 +631,12 @@ function _bindControls(canvas) {
       const dy = e.touches[0].clientY - lastMY;
       if (Math.abs(dx) > 2 || Math.abs(dy) > 2) mouseMoved = true;
       tgtTheta -= dx * 0.005;
-      tgtPhi    = Math.max(0.15, Math.min(Math.PI-0.15, tgtPhi - dy * 0.004));
+      tgtPhi = Math.max(0.15, Math.min(Math.PI - 0.15, tgtPhi - dy * 0.004));
       lastMX = e.touches[0].clientX; lastMY = e.touches[0].clientY;
     } else if (e.touches.length === 2) {
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
-      const dist = Math.sqrt(dx*dx + dy*dy);
+      const dist = Math.sqrt(dx * dx + dy * dy);
       tgtR = Math.max(2, Math.min(150, tgtR - (dist - lastTouchDist) * 0.1));
       lastTouchDist = dist;
     }
@@ -622,11 +668,11 @@ function _animate() {
   pivot.lerp(pivotTarget, 0.06);
 
   let dTheta = tgtTheta - camTheta;
-  while (dTheta >  Math.PI) dTheta -= Math.PI*2;
-  while (dTheta < -Math.PI) dTheta += Math.PI*2;
+  while (dTheta > Math.PI) dTheta -= Math.PI * 2;
+  while (dTheta < -Math.PI) dTheta += Math.PI * 2;
   camTheta += dTheta * 0.05;
-  camPhi   += (tgtPhi - camPhi) * 0.05;
-  camR     += (tgtR   - camR)   * 0.05;
+  camPhi += (tgtPhi - camPhi) * 0.05;
+  camR += (tgtR - camR) * 0.05;
 
   const sinPhi = Math.sin(camPhi);
   camera.position.set(
@@ -640,28 +686,57 @@ function _animate() {
   if (performance.now() - lastRaycast > 80) { lastRaycast = performance.now(); _updateHover(); }
 
   renderer.render(scene, camera);
+  if (labelRenderer) labelRenderer.render(scene, camera);
+
+  // Harmonic Synthesizer — feed camera position to sonification module
+  try { sonicUpdate(camera.position); } catch { }
 }
 
+/**
+ * Unified animation function — behaviour driven by _animState.
+ *   'default'  : sine/cosine positional drift ±0.04 units
+ *   'time'     : lerp stars toward _timePosArray (year → Z axis)
+ *   'crucible' : stars frozen at basePosArray; labels updated
+ */
 function _animateFloats() {
-  let nS=false, nM=false, nL=false;
-  starDataArray.forEach(({ tierMesh, localId, globalIdx }) => {
+  let nS = false, nM = false, nL = false;
+  starDataArray.forEach(({ tierMesh, localId, globalIdx }, i) => {
     tierMesh.getMatrixAt(localId, _floatDummy.matrix);
     _floatDummy.matrix.decompose(_floatDummy.position, _floatDummy.quaternion, _floatDummy.scale);
     if (_floatDummy.scale.x < 0.1) return;
-    const b = basePosArray;
-    _floatDummy.position.set(
-      b[globalIdx*3]   + Math.sin(t*0.25 + globalIdx)     * 0.04,
-      b[globalIdx*3+1] + Math.cos(t*0.2  + globalIdx*1.3) * 0.04,
-      b[globalIdx*3+2] + Math.sin(t*0.18 + globalIdx*0.7) * 0.04,
-    );
+
+    const bx = basePosArray[globalIdx * 3];
+    const by = basePosArray[globalIdx * 3 + 1];
+    const bz = basePosArray[globalIdx * 3 + 2];
+
+    if (_animState === 'time' && _timePosArray) {
+      // LERP toward year-mapped position
+      const tx = _timePosArray[i * 3];
+      const ty = _timePosArray[i * 3 + 1];
+      const tz = _timePosArray[i * 3 + 2];
+      _floatDummy.position.lerp(new THREE.Vector3(tx, ty, tz), 0.04);
+    } else if (_animState === 'crucible') {
+      // Freeze at base positions; update CSS2D label positions
+      _floatDummy.position.set(bx, by, bz);
+      const label = _crucibleLabels[i];
+      if (label) label.position.set(bx, by + 0.5, bz);
+    } else {
+      // DEFAULT: sine/cosine micro-drift
+      _floatDummy.position.set(
+        bx + Math.sin(t * 0.25 + globalIdx) * 0.04,
+        by + Math.cos(t * 0.2 + globalIdx * 1.3) * 0.04,
+        bz + Math.sin(t * 0.18 + globalIdx * 0.7) * 0.04,
+      );
+    }
+
     _floatDummy.updateMatrix();
     tierMesh.setMatrixAt(localId, _floatDummy.matrix);
-    if (tierMesh === instancedSmall) nS=true;
-    else if (tierMesh === instancedMed) nM=true;
-    else nL=true;
+    if (tierMesh === instancedSmall) nS = true;
+    else if (tierMesh === instancedMed) nM = true;
+    else nL = true;
   });
   if (nS && instancedSmall) instancedSmall.instanceMatrix.needsUpdate = true;
-  if (nM && instancedMed)   instancedMed.instanceMatrix.needsUpdate   = true;
+  if (nM && instancedMed) instancedMed.instanceMatrix.needsUpdate = true;
   if (nL && instancedLarge) instancedLarge.instanceMatrix.needsUpdate = true;
 }
 
@@ -673,7 +748,7 @@ function _castAgainstInstances() {
 
   for (const [im, map] of [
     [instancedSmall, instanceMapSmall],
-    [instancedMed,   instanceMapMed],
+    [instancedMed, instanceMapMed],
     [instancedLarge, instanceMapLarge],
   ]) {
     if (!im || !map.length) continue;
@@ -704,15 +779,15 @@ function _updateHover() {
       tooltip.style.display = 'block';
       document.getElementById('tt-title').textContent = result.star.title || '';
       document.getElementById('tt-meta').textContent =
-        `${(result.star.authors||'').split(',')[0]} · ${result.star.year||''} · ${(result.star.cite||0).toLocaleString()} citations`;
+        `${(result.star.authors || '').split(',')[0]} · ${result.star.year || ''} · ${(result.star.cite || 0).toLocaleString()} citations`;
     }
     const proj = result.worldPos.clone().project(camera);
-    tooltip.style.left = ((proj.x*0.5+0.5)*innerWidth  + 16) + 'px';
-    tooltip.style.top  = ((-proj.y*0.5+0.5)*innerHeight - 10) + 'px';
+    tooltip.style.left = ((proj.x * 0.5 + 0.5) * innerWidth + 16) + 'px';
+    tooltip.style.top = ((-proj.y * 0.5 + 0.5) * innerHeight - 10) + 'px';
     ringMesh.position.copy(result.worldPos);
     ringMesh.lookAt(camera.position);
     ringMesh.visible = true;
-    ringMat.opacity  = 0.9;
+    ringMat.opacity = 0.9;
   } else {
     if (hoveredStarIdx !== -1) {
       document.body.style.cursor = 'crosshair';
@@ -730,5 +805,174 @@ function _flushAll(matrixOnly = false) {
     if (!im) continue;
     im.instanceMatrix.needsUpdate = true;
     if (!matrixOnly && im.instanceColor) im.instanceColor.needsUpdate = true;
+  }
+}
+
+// ── Noosphere Feature Exports ─────────────────────────────────────────────────
+
+/** Returns current camera position (for sonification module) */
+export function getCameraPosition() {
+  return camera ? camera.position : new THREE.Vector3();
+}
+
+/** Returns Map<clusterId, THREE.Vector3> of cluster centroids */
+export function getClusterCentroids() {
+  const map = new Map();
+  const acc = {};
+  starDataArray.forEach(({ star }) => {
+    if (!acc[star.cluster]) acc[star.cluster] = { x: 0, y: 0, z: 0, n: 0 };
+    const b = basePosArray;
+    const idx = starDataArray.findIndex(e => e.star === star);
+    acc[star.cluster].x += basePosArray[idx * 3];
+    acc[star.cluster].y += basePosArray[idx * 3 + 1];
+    acc[star.cluster].z += basePosArray[idx * 3 + 2];
+    acc[star.cluster].n++;
+  });
+  Object.entries(acc).forEach(([id, { x, y, z, n }]) => {
+    map.set(id, new THREE.Vector3(x / n, y / n, z / n));
+  });
+  return map;
+}
+
+// ── Time Mode ─────────────────────────────────────────────────────────────────
+
+export function isTimeModeActive() { return _timeModeActive; }
+
+export function toggleTimeMode(enable) {
+  _timeModeActive = enable;
+  _animState = enable ? 'time' : 'default';
+
+  if (enable && !_timePosArray) {
+    // Build year-mapped positions on first use
+    const years = starDataArray.map(e => e.star.year || 0).filter(y => y > 0);
+    const minY = Math.min(...years) || 1900;
+    const maxY = Math.max(...years) || 2025;
+    _timePosArray = new Float32Array(starDataArray.length * 3);
+    starDataArray.forEach(({ star }, i) => {
+      const yr = star.year || minY;
+      const norm = (yr - minY) / (maxY - minY || 1);  // 0..1
+      _timePosArray[i * 3] = basePosArray[i * 3];          // keep x
+      _timePosArray[i * 3 + 1] = basePosArray[i * 3 + 1];      // keep y
+      _timePosArray[i * 3 + 2] = (norm - 0.5) * 50;            // z = -25..+25
+    });
+  }
+}
+
+// ── The Crucible ──────────────────────────────────────────────────────────────
+
+export function enterCrucible(clusterId) {
+  exitCrucible(); // clean up any previous session
+  _crucibleCluster = clusterId;
+  _animState = 'crucible';
+
+  // Dim all non-cluster stars
+  starDataArray.forEach(({ star, tierMesh, localId, globalIdx }) => {
+    if (star.cluster !== clusterId) {
+      dummy.position.set(
+        basePosArray[globalIdx * 3],
+        basePosArray[globalIdx * 3 + 1],
+        basePosArray[globalIdx * 3 + 2],
+      );
+      dummy.quaternion.identity();
+      dummy.scale.setScalar(0.02);
+      dummy.updateMatrix();
+      tierMesh.setMatrixAt(localId, dummy.matrix);
+    }
+  });
+  _flushAll(true);
+  if (edgeSegments) edgeSegments.material.opacity = 0.01;
+
+  // Create CSS2D labels — one per star in this cluster.
+  // _crucibleLabels is indexed parallel to starDataArray so _animateFloats
+  // can update each label position every frame (fixes the stale-position bug).
+  _crucibleLabels = new Array(starDataArray.length).fill(null);
+  starDataArray.forEach(({ star, globalIdx }, i) => {
+    if (star.cluster !== clusterId) return;
+    const div = document.createElement('div');
+    div.className = 'crucible-label';
+    div.textContent = star.title ? (star.title.slice(0, 32) + (star.title.length > 32 ? '…' : '')) : '';
+    const obj = new CSS2DObject(div);
+    obj.position.set(
+      basePosArray[globalIdx * 3],
+      basePosArray[globalIdx * 3 + 1] + 0.5,
+      basePosArray[globalIdx * 3 + 2],
+    );
+    scene.add(obj);
+    _crucibleLabels[i] = obj;
+  });
+
+  // Fly close to the cluster
+  const anchor = CLUSTER_ANCHORS[clusterId];
+  if (anchor) {
+    pivotTarget.copy(anchor);
+    const dir = anchor.clone().normalize();
+    tgtTheta = Math.atan2(dir.x, dir.z);
+    tgtPhi = Math.acos(Math.max(-1, Math.min(1, dir.y))) * 0.7 + 0.2;
+    tgtR = 7;
+    _warp();
+  }
+
+  // Show banner
+  const banner = document.getElementById('crucible-banner');
+  if (banner) {
+    banner.textContent = `THE CRUCIBLE  ·  ${clusterId.toUpperCase()}  —  ESC to exit`;
+    banner.style.opacity = '1';
+  }
+}
+
+export function exitCrucible() {
+  if (!_crucibleCluster) return;
+  _crucibleCluster = null;
+  _animState = _timeModeActive ? 'time' : 'default';
+
+  // Remove labels
+  _crucibleLabels.forEach(obj => obj && scene.remove(obj));
+  _crucibleLabels = [];
+
+  // Restore stars
+  starDataArray.forEach(({ tierMesh, localId, globalIdx }) => {
+    dummy.position.set(
+      basePosArray[globalIdx * 3],
+      basePosArray[globalIdx * 3 + 1],
+      basePosArray[globalIdx * 3 + 2],
+    );
+    dummy.quaternion.identity();
+    dummy.scale.setScalar(1);
+    dummy.updateMatrix();
+    tierMesh.setMatrixAt(localId, dummy.matrix);
+  });
+  _flushAll(true);
+  if (edgeSegments) edgeSegments.material.opacity = 0.45;
+
+  // Return camera to overview
+  pivotTarget.set(0, 0, 0);
+  tgtR = 85;
+
+  // Hide banner
+  const banner = document.getElementById('crucible-banner');
+  if (banner) banner.style.opacity = '0';
+}
+
+// ── WebXR ─────────────────────────────────────────────────────────────────────
+
+export async function enterXR() {
+  if (!navigator.xr) return;
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', {
+      requiredFeatures: ['local-floor'],
+      optionalFeatures: ['bounded-floor', 'hand-tracking'],
+    });
+    renderer.xr.enabled = true;
+    await renderer.xr.setSession(session);
+    // Switch from rAF to XR animation loop
+    cancelAnimationFrame(animFrame);
+    renderer.setAnimationLoop(_animate);
+    session.addEventListener('end', () => {
+      renderer.xr.enabled = false;
+      renderer.setAnimationLoop(null);
+      _animate(); // restart rAF loop
+    });
+  } catch (e) {
+    console.warn('[galaxy] WebXR session failed:', e);
   }
 }

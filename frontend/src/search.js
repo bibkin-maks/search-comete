@@ -13,7 +13,11 @@
 import { FALLBACK_PAPERS, KEYWORD_MAP } from './data.js';
 
 const API_BASE = '/api';
-let _usingBackend = null; // null = unknown, true/false after first check
+
+// Health-check cache with 30 s TTL so the app auto-recovers after backend restarts.
+let _usingBackend = null;          // null = unknown, true/false after first check
+let _backendCheckedAt = 0;         // performance.now() timestamp of last check
+const BACKEND_TTL_MS = 30_000;     // re-check after 30 seconds
 
 /**
  * Main search entry point.
@@ -21,15 +25,23 @@ let _usingBackend = null; // null = unknown, true/false after first check
  * All returned papers are guaranteed to have a numeric `cite` field.
  */
 export async function doSearch(query) {
-  if (_usingBackend === null) {
+  // Re-check health if cache is stale (first load, or TTL expired)
+  const cacheStale = _usingBackend === null ||
+    (performance.now() - _backendCheckedAt > BACKEND_TTL_MS);
+
+  if (cacheStale) {
     _usingBackend = await _checkBackend();
+    _backendCheckedAt = performance.now();
   }
+
   if (_usingBackend) {
     try {
       return await _remoteSearch(query);
     } catch (e) {
       console.warn('[search] Backend failed, falling back to local search:', e.message);
+      // Invalidate cache immediately so next search re-checks
       _usingBackend = false;
+      _backendCheckedAt = 0;
     }
   }
   return _localSearch(query);
@@ -49,10 +61,10 @@ async function _remoteSearch(query) {
   // compatibility with galaxy.js / panel.js.
   return (data.results || []).map(r => ({
     ...r,
-    cite:    r.cite    ?? r.citations ?? 0,
+    cite: r.cite ?? r.citations ?? 0,
     cluster: r.cluster ?? r.cluster_id ?? '',
-    color:   r.color   ?? r.cluster_color ?? '#ffffff',
-    score:   r.score   ?? 0.5,
+    color: r.color ?? r.cluster_color ?? '#ffffff',
+    score: r.score ?? 0.5,
   }));
 }
 
@@ -68,7 +80,7 @@ async function _checkBackend() {
 // ── Local keyword search (works with no backend) ───────────────────────────
 
 function _localSearch(query) {
-  const q      = query.toLowerCase();
+  const q = query.toLowerCase();
   const tokens = q.split(/\s+/).filter(Boolean);
   const scores = {};
 
@@ -84,7 +96,7 @@ function _localSearch(query) {
   // Score via paper fields
   FALLBACK_PAPERS.forEach(p => {
     tokens.forEach(tok => {
-      if ((p.title    || '').toLowerCase().includes(tok)) scores[p.id] += 2;
+      if ((p.title || '').toLowerCase().includes(tok)) scores[p.id] += 2;
       if ((p.abstract || '').toLowerCase().includes(tok)) scores[p.id] += 0.5;
       (p.keywords || []).forEach(kw => {
         if (kw.includes(tok) || tok.includes(kw)) scores[p.id] += 1;
@@ -97,7 +109,7 @@ function _localSearch(query) {
     .sort((a, b) => scores[b.id] - scores[a.id])
     .map(p => ({
       ...p,
-      cite:  p.cite ?? p.citations ?? 0, // FIX 2: unify field
+      cite: p.cite ?? p.citations ?? 0, // FIX 2: unify field
       score: Math.min(0.99, scores[p.id] / 6),
     }));
 

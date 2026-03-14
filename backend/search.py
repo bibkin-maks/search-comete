@@ -2,20 +2,124 @@
 search-comete — search.py
 All Elasticsearch query logic, isolated from the FastAPI routes.
 
-Fixes applied:
-  1. text_search(): maps `cluster_id` → `cluster` and `cluster_color` → `color`
-     and `citations` → `cite` in the returned SearchResult so the frontend
-     receives the field names it actually uses.
-  2. get_all_stars(): same mapping. Also exposes both `cite` and `citations`.
-  3. get_paper_with_similar(): maps all fields correctly in PaperDetail.
-  4. Added error handling for missing `embedding` field (papers indexed without
-     embeddings won't crash the similar-papers lookup).
+Field mapping is now handled entirely by the Pydantic V2 models in models.py.
+This file passes raw ES source dicts directly to the model constructors;
+the normalise_fields validator handles any legacy alias names.
 """
 
+from __future__ import annotations
+import asyncio
 from elasticsearch import AsyncElasticsearch
 from .models import SearchResult, StarPoint, SimilarPaper, PaperDetail
 
+# ── Lazy sentence-transformer singleton ──────────────────────────────────────
+_embed_model = None
+
+def _get_embed_model():
+    global _embed_model
+    if _embed_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+            print('[search] Loaded all-MiniLM-L6-v2 for RRF hybrid search')
+        except Exception as e:
+            print(f'[search] sentence-transformers unavailable: {e}')
+    return _embed_model
+
 INDEX = "knowledge_galaxy"
+
+
+async def rrf_search(
+    es: AsyncElasticsearch,
+    query: str,
+    size: int = 20,
+    cluster: str | None = None,
+    rrf_k: int = 60,
+) -> tuple[str, int, list[SearchResult]]:
+    """
+    Reciprocal Rank Fusion of BM25 + kNN results.
+    Returns (mode, total_hits, results) where mode is 'rrf' or 'bm25'.
+    Falls back to text_search() if embedding model is unavailable.
+    """
+    model = _get_embed_model()
+    if model is None:
+        total, results = await text_search(es, query, size=size, cluster=cluster)
+        return 'bm25', total, results
+
+    # Encode query in a thread pool so we don't block the event loop
+    loop = asyncio.get_event_loop()
+    vector = await loop.run_in_executor(None, lambda: model.encode(query).tolist())
+
+    filters = []
+    if cluster:
+        # Accept both canonical and legacy cluster field name
+        filters.append({"bool": {"should": [
+            {"term": {"cluster":    cluster}},
+            {"term": {"cluster_id": cluster}},
+        ]}})
+
+    base_query = {
+        "bool": {
+            "should": [
+                {"match": {"title":    {"query": query, "boost": 2.5}}},
+                {"match": {"abstract": {"query": query, "boost": 1.0}}},
+            ],
+            "filter": filters,
+            "minimum_should_match": 1,
+        }
+    }
+    bm25_body = {
+        "query": base_query,
+        "size": size * 3,
+        "_source": {"excludes": ["embedding"]},
+    }
+    knn_body = {
+        "knn": {
+            "field": "embedding",
+            "query_vector": vector,
+            "k": size * 3,
+            "num_candidates": max(100, size * 10),
+        },
+        "_source": {"excludes": ["embedding"]},
+        "size": size * 3,
+    }
+    if filters:
+        knn_body["knn"]["filter"] = filters[0]
+
+    # Run both searches in parallel
+    bm25_resp, knn_resp = await asyncio.gather(
+        es.search(index=INDEX, body=bm25_body),
+        es.search(index=INDEX, body=knn_body),
+    )
+
+    # Build RRF scores: score(d) = Σ 1/(k + rank)
+    rrf_scores: dict[str, float] = {}
+    docs: dict[str, dict] = {}
+
+    for rank, hit in enumerate(bm25_resp["hits"]["hits"]):
+        doc_id = hit["_source"]["id"]
+        rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (rrf_k + rank + 1)
+        docs[doc_id] = hit["_source"]
+
+    for rank, hit in enumerate(knn_resp["hits"]["hits"]):
+        doc_id = hit["_source"]["id"]
+        rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (rrf_k + rank + 1)
+        docs[doc_id] = hit["_source"]
+
+    # Sort by RRF score descending, take top `size`
+    sorted_ids = sorted(rrf_scores, key=lambda d: rrf_scores[d], reverse=True)[:size]
+    max_rrf = rrf_scores[sorted_ids[0]] if sorted_ids else 1.0
+
+    results = []
+    for doc_id in sorted_ids:
+        s = docs[doc_id]
+        results.append(SearchResult(
+            **s,
+            score=round(rrf_scores[doc_id] / max_rrf, 3),
+        ))
+
+    total = len(rrf_scores)  # approx combined unique hits
+    return 'rrf', total, results
 
 
 async def text_search(
@@ -25,12 +129,15 @@ async def text_search(
     cluster: str | None = None,
 ) -> tuple[int, list[SearchResult]]:
     """
-    Hybrid BM25 + field-boosted search.
+    BM25 text search fallback.
     Returns (total_hits, results).
     """
     filters = []
     if cluster:
-        filters.append({"term": {"cluster_id": cluster}})
+        filters.append({"bool": {"should": [
+            {"term": {"cluster":    cluster}},
+            {"term": {"cluster_id": cluster}},
+        ]}})
 
     body = {
         "query": {
@@ -52,25 +159,9 @@ async def text_search(
 
     results = []
     for h in resp["hits"]["hits"]:
-        s = h["_source"]
-        cite_val = s.get("citations", 0) or s.get("cite", 0) or 0
         results.append(SearchResult(
-            id         = s["id"],
-            title      = s["title"],
-            authors    = s.get("authors", ""),
-            year       = s.get("year"),
-            # FIX: expose as `cite` — frontend uses this field name
-            cite       = cite_val,
-            citations  = cite_val,
-            abstract   = s.get("abstract", ""),
-            # FIX: map cluster_id → cluster, cluster_color → color
-            cluster    = s.get("cluster_id", s.get("cluster", "")),
-            color      = s.get("cluster_color", s.get("color", "#ffffff")),
-            # FIX: map pos_x/y/z → x/y/z
-            x          = s.get("pos_x", s.get("x", 0.0)),
-            y          = s.get("pos_y", s.get("y", 0.0)),
-            z          = s.get("pos_z", s.get("z", 0.0)),
-            score      = round(h["_score"] / max_score, 3),
+            **h["_source"],
+            score=round(h["_score"] / max_score, 3),
         ))
     return resp["hits"]["total"]["value"], results
 
@@ -81,15 +172,23 @@ async def get_all_stars(
 ) -> list[StarPoint]:
     """
     Returns every paper's lightweight star data for the galaxy render.
-    Uses search_after pagination to safely handle large datasets beyond ES's
-    default 10 000-hit window.
+    Uses search_after pagination to handle datasets beyond the 10k hit window.
     """
-    query = {"term": {"cluster_id": cluster}} if cluster else {"match_all": {}}
+    if cluster:
+        query = {"bool": {"should": [
+            {"term": {"cluster":    cluster}},
+            {"term": {"cluster_id": cluster}},
+        ]}}
+    else:
+        query = {"match_all": {}}
+
     source_fields = [
-        "id", "title", "authors", "year", "citations",
-        "cluster_id", "cluster_color", "pos_x", "pos_y", "pos_z",
-        # also accept alternate field names written by older pipeline versions
-        "cluster", "color", "x", "y", "z", "cite",
+        "id", "title", "authors", "year",
+        "cite", "citations",
+        "cluster", "cluster_id",
+        "color", "cluster_color",
+        "x", "y", "z",
+        "pos_x", "pos_y", "pos_z",
     ]
     results = []
     search_after = None
@@ -111,22 +210,7 @@ async def get_all_stars(
             break
 
         for h in hits:
-            s = h["_source"]
-            cite_val = s.get("citations", 0) or s.get("cite", 0) or 0
-            results.append(StarPoint(
-                id        = s["id"],
-                title     = s["title"],
-                authors   = s.get("authors", ""),
-                year      = s.get("year"),
-                cite      = cite_val,
-                citations = cite_val,
-                # FIX: accept both naming conventions
-                cluster   = s.get("cluster_id",    s.get("cluster", "")),
-                color     = s.get("cluster_color",  s.get("color", "#ffffff")),
-                x         = s.get("pos_x",          s.get("x", 0.0)),
-                y         = s.get("pos_y",          s.get("y", 0.0)),
-                z         = s.get("pos_z",          s.get("z", 0.0)),
-            ))
+            results.append(StarPoint(**h["_source"]))
 
         if len(hits) < page_size:
             break
@@ -141,8 +225,7 @@ async def get_paper_with_similar(
     k: int = 6,
 ) -> PaperDetail | None:
     """
-    Fetch a paper by its 'id' field value (e.g. an arxiv URL), then run kNN
-    to find the k most similar papers.
+    Fetch a paper by its 'id' field value, then run kNN to find similar papers.
     """
     search_resp = await es.search(
         index=INDEX,
@@ -155,12 +238,10 @@ async def get_paper_with_similar(
     if not hits:
         return None
 
-    doc = hits[0]
-    src = doc["_source"]
+    src = hits[0]["_source"]
     embedding = src.get("embedding", [])
     similar: list[SimilarPaper] = []
 
-    # FIX: only attempt kNN if we actually have an embedding
     if embedding:
         try:
             knn_resp = await es.search(
@@ -179,36 +260,13 @@ async def get_paper_with_similar(
             for hit in knn_resp["hits"]["hits"]:
                 s = hit["_source"]
                 if s["id"] != paper_id:
-                    similar.append(SimilarPaper(
-                        id      = s["id"],
-                        title   = s["title"],
-                        authors = s.get("authors", ""),
-                        year    = s.get("year"),
-                        x       = s.get("pos_x", s.get("x", 0.0)),
-                        y       = s.get("pos_y", s.get("y", 0.0)),
-                        z       = s.get("pos_z", s.get("z", 0.0)),
-                    ))
+                    similar.append(SimilarPaper(**s))
         except Exception as e:
-            # kNN failed (e.g. index has no embedding field) — return without similar
             print(f"[search] kNN lookup failed for {paper_id}: {e}")
 
-    cite_val = src.get("citations", 0) or src.get("cite", 0) or 0
-
     return PaperDetail(
-        id        = src["id"],
-        title     = src["title"],
-        authors   = src.get("authors", ""),
-        year      = src.get("year"),
-        citations = cite_val,
-        cite      = cite_val,
-        abstract  = src.get("abstract", ""),
-        venue     = src.get("venue", ""),
-        cluster   = src.get("cluster_id",   src.get("cluster", "")),
-        color     = src.get("cluster_color", src.get("color", "#ffffff")),
-        x         = src.get("pos_x",         src.get("x", 0.0)),
-        y         = src.get("pos_y",         src.get("y", 0.0)),
-        z         = src.get("pos_z",         src.get("z", 0.0)),
-        similar   = similar[:k],
+        **src,
+        similar=similar[:k],
     )
 
 
@@ -223,7 +281,7 @@ async def get_cluster_stats(es: AsyncElasticsearch) -> dict:
                     "terms": {"field": "cluster_id", "size": 20},
                     "aggs": {
                         "label":       {"terms": {"field": "cluster_label", "size": 1}},
-                        "color":       {"terms": {"field": "cluster_color", "size": 1}},
+                        "color":       {"terms": {"field": "cluster_color",  "size": 1}},
                         "avg_year":    {"avg":   {"field": "year"}},
                         "total_cites": {"sum":   {"field": "citations"}},
                     },

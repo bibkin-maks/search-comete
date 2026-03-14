@@ -1,22 +1,32 @@
 /**
- * search-comete — main.js
- * Entry point. Injects the UI shell then initialises galaxy, search, and panel.
+ * search-comete — main.js (Noosphere Edition)
+ * Entry point. Injects UI, runs onboarding lore, initialises galaxy + all Phase 3 features.
  *
- * Fixes applied:
- *  1. loadStars(): The live API is tried first, but if the returned data has
- *     fewer than 3 distinct clusters we fall through to the static stars.json
- *     and then to FALLBACK_PAPERS. This prevents the galaxy from showing only
- *     ml+bio when the pipeline hasn't indexed all clusters yet.
- *  2. Legend rebuild: deferred until after initGalaxy() resolves so
- *     CLUSTER_COLORS is already populated (it was being read too early).
- *  3. Legend 'all' row click-handler now correctly uses clearHighlights()
- *     before calling filterCluster('all').
+ * Noosphere features added:
+ *  1. Onboarding lore sequence (localStorage-gated)
+ *  2. Voice input via Web Speech API
+ *  3. Data sonification toggle (Harmonic Synthesizer)
+ *  4. Time Mode — stars reorganise along Z = publication year
+ *  5. The Crucible — double-click to isolate a cluster (handled in galaxy.js)
+ *  6. WebXR entry button (shown if browser supports immersive-vr)
  */
 
-import { initGalaxy, highlightStars, clearHighlights, flyTo, flyToCluster, getRemappedPos, CLUSTER_COLORS } from './galaxy.js';
-import { doSearch }    from './search.js';
+import {
+  initGalaxy, highlightStars, clearHighlights,
+  flyTo, flyToCluster, getRemappedPos,
+  CLUSTER_COLORS,
+  toggleTimeMode, isTimeModeActive,
+  exitCrucible,
+  enterXR,
+  getClusterCentroids, getCameraPosition,
+  setReducedMotion,
+} from './galaxy.js';
+import { doSearch } from './search.js';
 import { showDetail, closeDetail } from './panel.js';
 import { FALLBACK_PAPERS } from './data.js';
+import {
+  initSonification, toggleSonification, isActive as isSonicActive,
+} from './sonification.js';
 
 // ── Inject UI HTML ────────────────────────────────────────────────────────────
 document.getElementById('app').innerHTML = `
@@ -24,13 +34,18 @@ document.getElementById('app').innerHTML = `
 
 <div id="hud-top">
   <div class="wordmark">search<em>·comète</em></div>
-  <div class="tagline">Semantic search · Elasticsearch ELSER · Vector space exploration</div>
-  <div class="elastic-pill"><div class="es-dot"></div>ELASTIC · kNN</div>
+  <div class="tagline">Noosphere 2.0 · Semantic search · Spatial knowledge discovery</div>
+  <div class="elastic-pill"><div class="es-dot"></div>ELASTIC · RRF</div>
+  <div id="noosphere-toolbar">
+    <button id="sound-btn" title="Harmonic Synthesizer">🔇</button>
+    <button id="time-btn" title="Temporal Mode">⏱ TIME</button>
+  </div>
 </div>
 
 <div id="search-area">
   <div id="search-wrap">
-    <input id="search-input" type="text" placeholder="Search the universe of ideas…" autocomplete="off" />
+    <input id="search-input" type="text" placeholder="Speak or type your query into the cosmos…" autocomplete="off" />
+    <button id="mic-btn" title="Voice input">🎤</button>
     <button id="search-btn">→</button>
   </div>
   <div id="query-chips">
@@ -52,7 +67,9 @@ document.getElementById('app').innerHTML = `
 </div>
 
 <div id="star-count"></div>
-<div id="instructions">drag to orbit · scroll to zoom · click a star</div>
+<div id="instructions">arrows/drag to orbit · scroll/+- to zoom · click a star</div>
+
+<div id="a11y-live" aria-live="polite" aria-atomic="true" class="sr-only"></div>
 
 <div id="detail-panel">
   <button id="detail-close">✕</button>
@@ -87,6 +104,8 @@ document.getElementById('app').innerHTML = `
     <div class="loader-label">Mapping the universe…</div>
   </div>
 </div>
+
+<div id="crucible-banner">THE CRUCIBLE — ESC to exit</div>
 `;
 
 // ── Inject global styles ──────────────────────────────────────────────────────
@@ -176,10 +195,145 @@ html, body { width: 100%; height: 100%; background: var(--ink); color: var(--pap
 .loader-bar { height:100%; width:0%; background:var(--gold); border-radius:2px; animation:load-progress 2s ease-in-out forwards; }
 @keyframes load-progress { 0%{width:0%} 60%{width:75%} 90%{width:92%} 100%{width:100%} }
 .loader-label { font-family:var(--mono); font-size:10px; letter-spacing:0.15em; color:rgba(245,242,235,0.3); text-transform:uppercase; }
+
+/* Noosphere toolbar */
+#noosphere-toolbar { display:flex; align-items:center; gap:6px; margin-left:10px; }
+#noosphere-toolbar button { font-family:var(--mono); font-size:10px; letter-spacing:0.08em; padding:5px 10px; border:0.5px solid rgba(245,242,235,0.15); border-radius:2px; cursor:pointer; transition:all 0.15s; color:rgba(245,242,235,0.45); background:transparent; pointer-events:auto; }
+#noosphere-toolbar button:hover { border-color:var(--gold); color:var(--gold); }
+#noosphere-toolbar button.ns-active { border-color:var(--gold); color:var(--gold); background:rgba(201,168,76,0.08); }
+
+/* Mic button */
+#mic-btn { position:absolute; right:52px; height:100%; width:38px; background:none; border:none; border-left:0.5px solid rgba(245,242,235,0.08); color:rgba(245,242,235,0.35); font-size:13px; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:color 0.15s; }
+#mic-btn:hover { color:var(--paper); }
+#mic-btn.listening { color:var(--gold); animation:mic-pulse 1s ease-in-out infinite; }
+@keyframes mic-pulse { 0%,100%{box-shadow:0 0 0 0 rgba(201,168,76,0.4)} 50%{box-shadow:0 0 0 6px rgba(201,168,76,0)} }
+
+/* Crucible banner */
+#crucible-banner { position:fixed; top:0; left:50%; transform:translateX(-50%); z-index:25; font-family:var(--mono); font-size:10px; letter-spacing:0.18em; color:var(--gold); background:rgba(10,10,18,0.9); border-bottom:0.5px solid rgba(201,168,76,0.25); padding:8px 24px; pointer-events:none; opacity:0; transition:opacity 0.4s; }
+
+/* Crucible labels (CSS2D) */
+.crucible-label { font-family:var(--mono); font-size:8px; letter-spacing:0.06em; color:rgba(245,242,235,0.7); background:rgba(10,10,18,0.75); border:0.5px solid rgba(245,242,235,0.1); border-radius:1px; padding:2px 5px; white-space:nowrap; pointer-events:none; }
+
+/* WebXR button */
+#xr-btn { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); z-index:10; font-family:var(--mono); font-size:10px; letter-spacing:0.12em; color:var(--gold); background:rgba(10,10,18,0.85); border:0.5px solid rgba(201,168,76,0.35); border-radius:2px; padding:8px 20px; cursor:pointer; transition:all 0.2s; }
+#xr-btn:hover { background:rgba(201,168,76,0.08); border-color:var(--gold); }
+
+/* Noosphere onboarding overlay */
+#noosphere-intro {
+  position:fixed; inset:0; z-index:200; background:var(--ink);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:36px;
+  background-image: radial-gradient(ellipse at 50% 50%, rgba(124,109,250,0.06) 0%, transparent 70%);
+}
+.ns-wordmark { font-family:var(--display); font-size:52px; font-weight:800; letter-spacing:-0.04em; color:var(--paper); animation:ns-fade 1.2s ease forwards; }
+.ns-wordmark em { font-style:normal; color:var(--gold); }
+.ns-lore { font-family:var(--serif); font-size:17px; font-style:italic; line-height:2; color:rgba(245,242,235,0.6); text-align:center; max-width:540px; animation:ns-fade 1.4s 0.4s ease both; }
+.ns-lore em { font-style:normal; color:var(--gold); }
+.ns-subtitle { font-family:var(--mono); font-size:10px; letter-spacing:0.2em; color:rgba(245,242,235,0.25); text-transform:uppercase; animation:ns-fade 1s 0.6s ease both; }
+#ns-enter { font-family:var(--mono); font-size:12px; letter-spacing:0.14em; color:var(--ink); background:var(--gold); border:none; border-radius:2px; padding:14px 36px; cursor:pointer; transition:all 0.2s; animation:ns-fade 1s 1.2s ease both; }
+#ns-enter:hover { background:#e0be5c; transform:translateY(-1px); }
+@keyframes ns-fade { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+
+/* Accessibility */
+.sr-only { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 `;
 document.head.appendChild(style);
 
-// ── Wire up interactions ──────────────────────────────────────────────────────
+// ── Accessibility: reduced-motion ────────────────────────────────────────────
+// Wire prefers-reduced-motion both on load and whenever the OS pref changes.
+const _motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+function _applyReducedMotion(e) {
+  setReducedMotion(e.matches);
+}
+_applyReducedMotion(_motionQuery);
+_motionQuery.addEventListener('change', _applyReducedMotion);
+
+// ── Noosphere toolbar button wiring ─────────────────────────────────────────
+const soundBtn = document.getElementById('sound-btn');
+if (soundBtn) {
+  soundBtn.addEventListener('click', () => {
+    const on = toggleSonification();
+    soundBtn.textContent = on ? '🔊' : '🔇';
+    soundBtn.classList.toggle('ns-active', on);
+  });
+}
+
+const timeBtn = document.getElementById('time-btn');
+if (timeBtn) {
+  timeBtn.addEventListener('click', () => {
+    const next = !isTimeModeActive();
+    toggleTimeMode(next);
+    timeBtn.classList.toggle('ns-active', next);
+    timeBtn.textContent = next ? '⏱ ORRERY' : '⏱ TIME';
+  });
+}
+
+// ── Voice input (Web Speech API) ─────────────────────────────────────────────
+const micBtn = document.getElementById('mic-btn');
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (SpeechRecognition && micBtn) {
+  const recog = new SpeechRecognition();
+  recog.lang = 'en-US';
+  recog.interimResults = false;
+  recog.maxAlternatives = 1;
+
+  micBtn.addEventListener('click', () => {
+    micBtn.classList.add('listening');
+    try { recog.start(); } catch { }
+  });
+  recog.onresult = e => {
+    const transcript = e.results[0][0].transcript;
+    let query = transcript;
+    let targetCluster = 'all';
+
+    const lower = transcript.toLowerCase();
+
+    // Intent Decomposition: "show me [cluster] papers about [topic]"
+    const clusterMap = {
+      'biology': 'bio', 'physics': 'phys', 'machine learning': 'ml', 'ai': 'ml',
+      'computer science': 'cs', 'math': 'math', 'chemistry': 'chem', 'economics': 'econ',
+      'environmental': 'env', 'environment': 'env', 'medical': 'med', 'medicine': 'med'
+    };
+
+    for (const [key, val] of Object.entries(clusterMap)) {
+      if (lower.includes(`${key} papers`) || lower.includes(`${key} research`)) {
+        targetCluster = val;
+        query = lower.replace(new RegExp(`${key} (papers|research)`, 'g'), '')
+          .replace(/show me|find|about|on|for/g, '').trim();
+        break;
+      }
+    }
+
+    // Strip generic filler if no domain matched
+    if (query === transcript) {
+      query = query.replace(/^(show me papers bridging|show me papers about|show me papers on|search for|find papers about|papers on)\s+/i, '');
+      query = query.replace(/\bbridging\b/i, '');
+      query = query.trim();
+    }
+
+    document.getElementById('search-input').value = query || transcript;
+    micBtn.classList.remove('listening');
+
+    if (targetCluster !== 'all') {
+      // Apply domain filter before running RRF search
+      import('./galaxy.js').then(({ filterCluster }) => {
+        filterCluster(targetCluster);
+        // update UI legend
+        document.querySelectorAll('.legend-row').forEach(r => {
+          r.classList.toggle('active', r.dataset.cluster === targetCluster);
+        });
+        triggerSearch();
+      });
+    } else {
+      triggerSearch();
+    }
+  };
+  recog.onend = () => micBtn.classList.remove('listening');
+  recog.onerror = () => micBtn.classList.remove('listening');
+} else if (micBtn) {
+  micBtn.style.display = 'none';
+}
+
+// ── Standard interaction wiring ──────────────────────────────────────────────
 
 document.getElementById('search-btn').addEventListener('click', triggerSearch);
 document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') triggerSearch(); });
@@ -205,6 +359,7 @@ document.getElementById('legend').addEventListener('click', e => {
 
 async function triggerSearch() {
   const q = document.getElementById('search-input').value.trim();
+  const a11y = document.getElementById('a11y-live');
   if (!q) {
     clearHighlights();
     document.getElementById('results-label').classList.remove('show');
@@ -215,6 +370,7 @@ async function triggerSearch() {
     const label = document.getElementById('results-label');
     label.textContent = 'NO RESULTS FOUND';
     label.classList.add('show');
+    if (a11y) a11y.textContent = 'No results found for: ' + q;
     setTimeout(() => label.classList.remove('show'), 2000);
     return;
   }
@@ -222,6 +378,7 @@ async function triggerSearch() {
   const label = document.getElementById('results-label');
   label.textContent = `${results.length} PAPERS FOUND — FLYING TO CLUSTER`;
   label.classList.add('show');
+  if (a11y) a11y.textContent = `${results.length} papers found for: ${q}. Flying to cluster.`;
   setTimeout(() => label.classList.remove('show'), 2500);
 
   highlightStars(results.map(r => r.id));
@@ -263,11 +420,11 @@ function _normaliseStars(stars) {
   return stars.map(s => ({
     ...s,
     cluster: s.cluster || s.cluster_id || '',
-    color:   s.color   || s.cluster_color || '#ffffff',
-    x:       s.x       ?? s.pos_x ?? 0,
-    y:       s.y       ?? s.pos_y ?? 0,
-    z:       s.z       ?? s.pos_z ?? 0,
-    cite:    s.cite    ?? s.citations ?? 0,
+    color: s.color || s.cluster_color || '#ffffff',
+    x: s.x ?? s.pos_x ?? 0,
+    y: s.y ?? s.pos_y ?? 0,
+    z: s.z ?? s.pos_z ?? 0,
+    cite: s.cite ?? s.citations ?? 0,
   }));
 }
 
@@ -342,39 +499,87 @@ async function loadStars() {
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 const CLUSTER_LABELS = {
-  ml:'MACHINE LEARNING', bio:'BIOLOGY', phys:'PHYSICS', cs:'COMPUTER SCIENCE',
-  math:'MATHEMATICS', chem:'CHEMISTRY', econ:'ECONOMICS', env:'ENVIRONMENT', med:'MEDICINE',
-  machine_learning:'MACHINE LEARNING', biology:'BIOLOGY', physics:'PHYSICS',
-  computer_science:'COMPUTER SCIENCE', mathematics:'MATHEMATICS', chemistry:'CHEMISTRY',
-  economics:'ECONOMICS', environment:'ENVIRONMENT', medicine:'MEDICINE',
+  ml: 'MACHINE LEARNING', bio: 'BIOLOGY', phys: 'PHYSICS', cs: 'COMPUTER SCIENCE',
+  math: 'MATHEMATICS', chem: 'CHEMISTRY', econ: 'ECONOMICS', env: 'ENVIRONMENT', med: 'MEDICINE',
+  machine_learning: 'MACHINE LEARNING', biology: 'BIOLOGY', physics: 'PHYSICS',
+  computer_science: 'COMPUTER SCIENCE', mathematics: 'MATHEMATICS', chemistry: 'CHEMISTRY',
+  economics: 'ECONOMICS', environment: 'ENVIRONMENT', medicine: 'MEDICINE',
 };
 
-loadStars().then(stars => {
-  initGalaxy(document.getElementById('canvas'), stars);
-  document.getElementById('star-count').textContent = `${stars.length} PAPERS INDEXED`;
+function startGalaxy() {
+  loadStars().then(stars => {
+    initGalaxy(document.getElementById('canvas'), stars);
+    document.getElementById('star-count').textContent = `${stars.length} PAPERS INDEXED`;
 
-  // FIX: Rebuild legend AFTER initGalaxy() so CLUSTER_COLORS is populated.
-  // Use a short rAF delay to let _discoverClusters() finish synchronously inside initGalaxy.
-  requestAnimationFrame(() => {
-    const clusterNames = [...new Set(stars.map(s => s.cluster).filter(Boolean))].sort();
-    const legend = document.getElementById('legend');
+    // Initialize Sonification now that we have stars and camera
+    initSonification(getCameraPosition, getClusterCentroids);
 
-    // Keep the ALL row, remove any stale rows
-    const allRow = legend.querySelector('[data-cluster="all"]');
-    legend.innerHTML = '';
-    if (allRow) legend.appendChild(allRow);
+    // Rebuild legend AFTER initGalaxy() so CLUSTER_COLORS is populated.
+    requestAnimationFrame(() => {
+      const clusterNames = [...new Set(stars.map(s => s.cluster).filter(Boolean))].sort();
+      const legend = document.getElementById('legend');
 
-    clusterNames.forEach(name => {
-      const colorHex = CLUSTER_COLORS[name];
-      const hex = colorHex ? '#' + colorHex.toString(16).padStart(6, '0') : '#888888';
-      const label = CLUSTER_LABELS[name.toLowerCase()] || name.toUpperCase().replace(/_/g, ' ');
-      const row = document.createElement('div');
-      row.className = 'legend-row';
-      row.dataset.cluster = name;
-      row.innerHTML = `<div class="legend-dot" style="background:${hex}"></div>${label}`;
-      legend.appendChild(row);
+      const allRow = legend.querySelector('[data-cluster="all"]');
+      legend.innerHTML = '';
+      if (allRow) legend.appendChild(allRow);
+
+      clusterNames.forEach(name => {
+        const colorHex = CLUSTER_COLORS[name];
+        const hex = colorHex ? '#' + colorHex.toString(16).padStart(6, '0') : '#888888';
+        const label = CLUSTER_LABELS[name.toLowerCase()] || name.toUpperCase().replace(/_/g, ' ');
+        const row = document.createElement('div');
+        row.className = 'legend-row';
+        row.dataset.cluster = name;
+        row.innerHTML = `<div class="legend-dot" style="background:${hex}"></div>${label}`;
+        legend.appendChild(row);
+      });
     });
 
-    console.log('[main] Legend built for clusters:', clusterNames);
+    // WebXR setup
+    if (navigator.xr) {
+      navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+        if (!supported) return;
+        const btn = document.createElement('button');
+        btn.id = 'xr-btn';
+        btn.textContent = '⬡ ENTER VR';
+        document.body.appendChild(btn);
+        btn.addEventListener('click', () => enterXR());
+      });
+    }
   });
-});
+}
+
+// ── Noosphere Onboarding Sequence ─────────────────────────────────────────────
+
+if (!localStorage.getItem('noosphere-entered')) {
+  const intro = document.createElement('div');
+  intro.id = 'noosphere-intro';
+  intro.innerHTML = `
+    <div class="ns-wordmark">NOOSPHERE <em>2.0</em></div>
+    <div class="ns-lore">
+      For decades, human knowledge was trapped in two-dimensional archives.<br>
+      Today, spatial computing has <em>ignited</em> the dormant data.<br>
+      Semantic bonds form gravitational fields.<br>
+      A universe of ideas <em>awakens.</em>
+    </div>
+    <div class="ns-subtitle">PHASE 3 INITIALIZED</div>
+    <button id="ns-enter">Enter the Noosphere →</button>
+  `;
+  document.body.appendChild(intro);
+
+  document.getElementById('ns-enter').addEventListener('click', () => {
+    localStorage.setItem('noosphere-entered', '1');
+    intro.style.transition = 'opacity 1.2s ease, transform 1.2s ease';
+    intro.style.opacity = '0';
+    intro.style.transform = 'scale(1.05)';
+    intro.style.pointerEvents = 'none';
+
+    // Start background processing while fading out
+    startGalaxy();
+
+    setTimeout(() => { intro.remove(); }, 1200);
+  });
+} else {
+  // Return visitor: skip intro
+  startGalaxy();
+}

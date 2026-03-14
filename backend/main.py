@@ -14,7 +14,7 @@ import os
 from .models import SearchResponse, PaperDetail
 from . import search as es_search
 
-app = FastAPI(title="search-comete API", version="0.1.0")
+app = FastAPI(title="search-comete API — Noosphere Edition", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,15 +56,20 @@ def _make_router(prefix: str) -> APIRouter:
         except Exception as e:
             return {"status": "degraded", "error": str(e)}
 
-    @router.get("/search", response_model=SearchResponse)
+    @router.get("/search")
     async def search(
         q:       str           = Query(..., description="Search query"),
         size:    int           = Query(20, ge=1, le=100),
         cluster: Optional[str] = Query(None),
     ):
         try:
-            total, results = await es_search.text_search(es, q, size=size, cluster=cluster)
-            return SearchResponse(total=total, results=results, query=q)
+            mode, total, results = await es_search.rrf_search(es, q, size=size, cluster=cluster)
+            return {
+                "total": total,
+                "results": [r.model_dump() for r in results],
+                "query": q,
+                "mode": mode,
+            }
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 

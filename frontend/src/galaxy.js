@@ -17,6 +17,7 @@
 
 import * as THREE from 'three';
 import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
+import { initPostProcessing, resizePostProcessing, setCrucibleLens, updateAndRender } from './postfx.js';
 import { showDetail } from './panel.js';
 import { update as sonicUpdate } from './sonification.js';
 
@@ -92,6 +93,7 @@ let instancedSmall, instancedMed, instancedLarge;
 let instanceMapSmall = [], instanceMapMed = [], instanceMapLarge = [];
 let starDataArray = [];
 let basePosArray;
+let _animatedMaterials = [];
 let edgeSegments;
 let ringMesh, ringMat;
 let animFrame;
@@ -106,9 +108,16 @@ let _timePosArray = null;   // Float32Array of year-mapped positions
 
 // Crucible state
 let _crucibleCluster = null;
-let _crucibleLabels = [];   // CSS2DObject instances
+let _crucibleLabels = [];   // CSS2DObject instances, indexed parallel to starDataArray
 let _lastClickTime = 0;
 let _lastClickCluster = null;
+
+// Accessibility: reduced-motion mode (set from main.js via prefers-reduced-motion)
+let _reducedMotion = false;
+export function setReducedMotion(enabled) {
+  _reducedMotion = enabled;
+  if (enabled) autoRotate = false;
+}
 
 const pivot = new THREE.Vector3(0, 0, 0);
 const pivotTarget = new THREE.Vector3(0, 0, 0);
@@ -172,6 +181,8 @@ export function initGalaxy(canvas, stars) {
   scene.fog = new THREE.FogExp2(0x06060f, 0.002);
 
   camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 600);
+
+  initPostProcessing(renderer, scene, camera);
 
   scene.add(new THREE.AmbientLight(0x111133, 2));
   _buildBackground();
@@ -355,23 +366,74 @@ function _buildNebulae(stars) {
   });
 }
 
+const _nebulaGeo = new THREE.PlaneGeometry(1, 1);
 function _makeNebula(color, size, anchor) {
-  const cvs = document.createElement('canvas');
-  cvs.width = cvs.height = 256;
-  const ctx = cvs.getContext('2d');
-  const r = (color >> 16) & 255, g = (color >> 8) & 255, b = color & 255;
-  const gr = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
-  gr.addColorStop(0, `rgba(${r},${g},${b},0.20)`);
-  gr.addColorStop(0.4, `rgba(${r},${g},${b},0.07)`);
-  gr.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = gr; ctx.fillRect(0, 0, 256, 256);
-  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: new THREE.CanvasTexture(cvs), transparent: true,
-    depthWrite: false, blending: THREE.AdditiveBlending,
-  }));
-  sp.scale.setScalar(size);
-  sp.position.copy(anchor);
-  return sp;
+  const c = new THREE.Color(color);
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: c },
+      uTime: { value: Math.random() * 100.0 }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        // Spherical billboard
+        vec4 mvPos = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        mvPos.xy += position.xy * length(vec3(modelMatrix[0].xyz));
+        gl_Position = projectionMatrix * mvPos;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uTime;
+      varying vec2 vUv;
+      
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+      }
+      float noise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i + vec2(0.0, 0.0)), hash(i + vec2(1.0, 0.0)), f.x),
+                   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+      }
+      float fbm(vec2 p) {
+        float f = 0.0;
+        f += 0.500 * noise(p); p = p * 2.02;
+        f += 0.250 * noise(p); p = p * 2.03;
+        f += 0.125 * noise(p);
+        return f;
+      }
+      
+      void main() {
+        vec2 uv = vUv * 2.0 - 1.0;
+        float dist = length(uv);
+        if (dist > 1.0) discard;
+        
+        vec2 p = vUv * 3.0 + vec2(uTime * 0.15);
+        float n = fbm(p);
+        
+        float edge = clamp(1.0 - dist, 0.0, 1.0);
+        edge = smoothstep(0.0, 0.8, edge);
+        
+        float density = n * edge;
+        density = pow(density, 1.2);
+        
+        gl_FragColor = vec4(uColor, density * 0.45);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+  _animatedMaterials.push(mat);
+
+  const mesh = new THREE.Mesh(_nebulaGeo, mat);
+  mesh.scale.setScalar(size);
+  mesh.position.copy(anchor);
+  return mesh;
 }
 
 function _makeStarTex() {
@@ -397,13 +459,61 @@ function _buildStars(stars) {
 
   console.log(`[galaxy] Star tiers — small(≤200): ${cntS}, med(201-5000): ${cntM}, large(>5000): ${cntL}`);
 
+  // Base materials for performance
   const mat = () => new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+  // Custom optics ShaderMaterial for large tier — wave-particle duality Fresnel rim
+  const largeMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 } },
+    vertexShader: `
+      attribute vec3 instanceColor;
+      varying vec3 vColor;
+      varying vec3 vNormal;
+      varying vec3 vViewPosition;
+      void main() {
+        vColor = instanceColor;
+        vec4 mvPosition = viewMatrix * modelMatrix * instanceMatrix * vec4(position, 1.0);
+        vViewPosition = -mvPosition.xyz;
+        
+        mat3 m = mat3(modelMatrix * instanceMatrix);
+        vNormal = normalize(normalMatrix * m * normal);
+        
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      varying vec3 vColor;
+      varying vec3 vNormal;
+      varying vec3 vViewPosition;
+      void main() {
+        vec3 normal = normalize(vNormal);
+        vec3 viewDir = normalize(vViewPosition);
+        
+        float fresnel = 1.0 - max(dot(viewDir, normal), 0.0);
+        float fresnelPow = pow(fresnel, 3.0);
+        
+        float pulse = 1.0 + 0.3 * sin(uTime * 3.0);
+        float r = fresnelPow * 1.2 * pulse;
+        float g = fresnelPow * 1.0 * pulse;
+        float b = fresnelPow * 0.8 * pulse;
+        
+        vec3 finalColor = vColor * (0.2 + fresnelPow * 1.5) + vec3(r, g, b) * vColor;
+        float alpha = fresnelPow * pulse * 1.2;
+        gl_FragColor = vec4(finalColor, min(alpha, 1.0));
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+  _animatedMaterials.push(largeMat);
 
   // Always create all three meshes with at least 1 slot to avoid null references.
   // Extra slots beyond actual count are harmless — they'll have scale(0).
   instancedSmall = new THREE.InstancedMesh(new THREE.SphereGeometry(0.07, 7, 7), mat(), Math.max(1, cntS));
   instancedMed = new THREE.InstancedMesh(new THREE.SphereGeometry(0.13, 8, 8), mat(), Math.max(1, cntM));
-  instancedLarge = new THREE.InstancedMesh(new THREE.SphereGeometry(0.22, 9, 9), mat(), Math.max(1, cntL));
+  instancedLarge = new THREE.InstancedMesh(new THREE.SphereGeometry(0.22, 9, 9), largeMat, Math.max(1, cntL));
 
   [instancedSmall, instancedMed, instancedLarge].forEach(im => {
     im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -603,12 +713,41 @@ function _bindControls(canvas) {
     }
   });
 
-  window.addEventListener('keydown', e => { if (e.key === 'Escape') exitCrucible(); });
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { exitCrucible(); return; }
+
+    // Don't intercept keys when the user is typing in an input
+    if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+
+    const ORBIT_STEP = 0.06;
+    const ZOOM_STEP = 4;
+    let didNav = false;
+
+    switch (e.key) {
+      case 'ArrowLeft': tgtTheta -= ORBIT_STEP; didNav = true; break;
+      case 'ArrowRight': tgtTheta += ORBIT_STEP; didNav = true; break;
+      case 'ArrowUp':
+        tgtPhi = Math.max(0.15, tgtPhi - ORBIT_STEP); didNav = true; break;
+      case 'ArrowDown':
+        tgtPhi = Math.min(Math.PI - 0.15, tgtPhi + ORBIT_STEP); didNav = true; break;
+      case '+': case '=':
+        tgtR = Math.max(2, tgtR - ZOOM_STEP); didNav = true; break;
+      case '-':
+        tgtR = Math.min(150, tgtR + ZOOM_STEP); didNav = true; break;
+    }
+
+    if (didNav) {
+      e.preventDefault();
+      autoRotate = false;
+      setTimeout(() => { autoRotate = true; }, 5000);
+    }
+  });
 
   window.addEventListener('resize', () => {
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
+    resizePostProcessing(innerWidth, innerHeight);
   });
 
   // Touch support
@@ -661,7 +800,8 @@ const clock = new THREE.Clock();
 
 function _animate() {
   animFrame = requestAnimationFrame(_animate);
-  t += clock.getDelta();
+  const dt = clock.getDelta();
+  t += dt;
 
   if (autoRotate && !isDragging) tgtTheta += 0.0006;
 
@@ -683,10 +823,14 @@ function _animate() {
   camera.lookAt(pivot);
 
   _animateFloats();
+  _animatedMaterials.forEach(m => m.uniforms.uTime && (m.uniforms.uTime.value = t));
+
   if (performance.now() - lastRaycast > 80) { lastRaycast = performance.now(); _updateHover(); }
 
-  renderer.render(scene, camera);
+  updateAndRender(dt, renderer, scene, camera);
   if (labelRenderer) labelRenderer.render(scene, camera);
+
+  _updateXR(dt);
 
   // Harmonic Synthesizer — feed camera position to sonification module
   try { sonicUpdate(camera.position); } catch { }
@@ -721,12 +865,16 @@ function _animateFloats() {
       const label = _crucibleLabels[i];
       if (label) label.position.set(bx, by + 0.5, bz);
     } else {
-      // DEFAULT: sine/cosine micro-drift
-      _floatDummy.position.set(
-        bx + Math.sin(t * 0.25 + globalIdx) * 0.04,
-        by + Math.cos(t * 0.2 + globalIdx * 1.3) * 0.04,
-        bz + Math.sin(t * 0.18 + globalIdx * 0.7) * 0.04,
-      );
+      // DEFAULT: sine/cosine micro-drift (disabled in reduced-motion mode)
+      if (_reducedMotion) {
+        _floatDummy.position.set(bx, by, bz);
+      } else {
+        _floatDummy.position.set(
+          bx + Math.sin(t * 0.25 + globalIdx) * 0.04,
+          by + Math.cos(t * 0.2 + globalIdx * 1.3) * 0.04,
+          bz + Math.sin(t * 0.18 + globalIdx * 0.7) * 0.04,
+        );
+      }
     }
 
     _floatDummy.updateMatrix();
@@ -864,6 +1012,7 @@ export function enterCrucible(clusterId) {
   exitCrucible(); // clean up any previous session
   _crucibleCluster = clusterId;
   _animState = 'crucible';
+  setCrucibleLens(true);
 
   // Dim all non-cluster stars
   starDataArray.forEach(({ star, tierMesh, localId, globalIdx }) => {
@@ -924,6 +1073,7 @@ export function exitCrucible() {
   if (!_crucibleCluster) return;
   _crucibleCluster = null;
   _animState = _timeModeActive ? 'time' : 'default';
+  setCrucibleLens(false);
 
   // Remove labels
   _crucibleLabels.forEach(obj => obj && scene.remove(obj));
@@ -964,6 +1114,7 @@ export async function enterXR() {
     });
     renderer.xr.enabled = true;
     await renderer.xr.setSession(session);
+    _initXRElements();
     // Switch from rAF to XR animation loop
     cancelAnimationFrame(animFrame);
     renderer.setAnimationLoop(_animate);
@@ -974,5 +1125,127 @@ export async function enterXR() {
     });
   } catch (e) {
     console.warn('[galaxy] WebXR session failed:', e);
+  }
+}
+
+// ── XR Implementation ────────────────────────────────────────────────────────
+
+let _xrController1, _xrController2;
+let _gazeReticle;
+let _vrHud;
+let _gazeTime = 0;
+let _gazedStar = null;
+
+function _initXRElements() {
+  if (_xrController1) return;
+
+  _xrController1 = renderer.xr.getController(0);
+  _xrController2 = renderer.xr.getController(1);
+  scene.add(_xrController1);
+  scene.add(_xrController2);
+
+  const laserGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -5)
+  ]);
+  const laserMat = new THREE.LineBasicMaterial({ color: 0xc9a84c });
+  _xrController1.add(new THREE.Line(laserGeo, laserMat));
+  _xrController2.add(new THREE.Line(laserGeo, laserMat));
+
+  const reticleGeo = new THREE.RingGeometry(0.015, 0.03, 32);
+  const reticleMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, depthTest: false, depthWrite: false });
+  _gazeReticle = new THREE.Mesh(reticleGeo, reticleMat);
+  _gazeReticle.position.z = -1;
+  camera.add(_gazeReticle);
+
+  const cx = document.createElement('canvas');
+  cx.width = 512; cx.height = 256;
+  const ctx = cx.getContext('2d');
+  ctx.fillStyle = 'rgba(10,10,18,0.85)';
+  ctx.fillRect(0, 0, 512, 256);
+  ctx.fillStyle = '#c9a84c';
+  ctx.font = '24px monospace';
+  ctx.fillText('NOOSPHERE VR HUD', 20, 40);
+  ctx.fillStyle = '#f5f2eb';
+  ctx.font = '16px monospace';
+  ctx.fillText('Gaze at a star to select', 20, 80);
+
+  const hudTex = new THREE.CanvasTexture(cx);
+  const hudMat = new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, depthTest: false });
+  _vrHud = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.4), hudMat);
+  _vrHud.position.set(0, -0.3, -1.2);
+  _vrHud.rotation.x = -0.2;
+  camera.add(_vrHud);
+
+  _xrController1.addEventListener('squeezestart', _onTeleport);
+  _xrController2.addEventListener('squeezestart', _onTeleport);
+}
+
+function _onTeleport(event) {
+  const controller = event.target;
+  const dummyMat = new THREE.Matrix4().extractRotation(controller.matrixWorld);
+  raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(dummyMat);
+
+  const hits = raycaster.intersectObjects([instancedLarge, instancedMed, instancedSmall]);
+  if (hits.length > 0) {
+    const hit = hits[0];
+    const starInfo = starDataArray.find(s => s.tierMesh === hit.object && s.localId === hit.instanceId);
+    if (starInfo) {
+      const b = basePosArray;
+      pivotTarget.set(b[starInfo.globalIdx * 3], b[starInfo.globalIdx * 3 + 1], b[starInfo.globalIdx * 3 + 2]);
+    }
+  }
+}
+
+function _updateXR(dt) {
+  if (!renderer.xr.isPresenting || !_gazeReticle) return;
+
+  raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+  const hits = raycaster.intersectObjects([instancedLarge, instancedMed, instancedSmall]);
+
+  if (hits.length > 0) {
+    const hit = hits[0];
+    const starInfo = starDataArray.find(s => s.tierMesh === hit.object && s.localId === hit.instanceId);
+    if (starInfo) {
+      if (_gazedStar !== starInfo) {
+        _gazedStar = starInfo;
+        _gazeTime = 0;
+      }
+      _gazeTime += dt;
+
+      const scale = Math.max(0.1, 1 - _gazeTime / 1.5);
+      _gazeReticle.scale.setScalar(scale);
+
+      if (_gazeTime > 1.5 && _vrHud) {
+        _gazeTime = 0;
+        showDetail(starInfo.star);
+        const cx = _vrHud.material.map.image;
+        const ctx = cx.getContext('2d');
+        ctx.clearRect(0, 0, 512, 256);
+        ctx.fillStyle = 'rgba(10,10,18,0.92)';
+        ctx.fillRect(0, 0, 512, 256);
+        ctx.fillStyle = '#c9a84c';
+        ctx.font = '18px monospace';
+        ctx.fillText(starInfo.star.cluster.toUpperCase(), 20, 30);
+        ctx.fillStyle = '#f5f2eb';
+        ctx.font = '22px serif';
+
+        const words = starInfo.star.title.split(' ');
+        let line = '', y = 70;
+        for (let w of words) {
+          let test = line + w + ' ';
+          if (ctx.measureText(test).width > 470) {
+            ctx.fillText(line, 20, y);
+            line = w + ' '; y += 28;
+          } else line = test;
+        }
+        ctx.fillText(line, 20, y);
+        _vrHud.material.map.needsUpdate = true;
+      }
+    }
+  } else {
+    _gazedStar = null;
+    _gazeTime = 0;
+    _gazeReticle.scale.setScalar(1);
   }
 }

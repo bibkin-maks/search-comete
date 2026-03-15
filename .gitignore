@@ -12,7 +12,7 @@ frontend/dist/
 # Environment
 .env
 
-# Pipeline cache (large files — don't commit)
+# Pipeline cache (large files - don't commit)
 pipeline/.cache/
 pipeline/stars.json
 

@@ -1,6 +1,6 @@
 """
-search-comete — backend/main.py
-FastAPI app. Routes only — query logic lives in search.py.
+search-comete - backend/main.py
+FastAPI app. Routes only - query logic lives in search.py.
 Run: uvicorn backend.main:app --reload --port 8000
 """
 
@@ -11,8 +11,8 @@ from elasticsearch import AsyncElasticsearch
 from typing import Optional
 import os
 
-from .models import SearchResponse, PaperDetail
-from . import search as es_search
+from models import SearchResponse, PaperDetail
+import search as es_search
 
 app = FastAPI(title="search-comete API — Noosphere Edition", version="0.2.0")
 
@@ -31,6 +31,8 @@ ES_API_KEY  = os.getenv("ES_API_KEY",  "")
 def _make_es_client() -> AsyncElasticsearch:
     if ES_CLOUD_ID and ES_API_KEY:
         return AsyncElasticsearch(cloud_id=ES_CLOUD_ID, api_key=ES_API_KEY)
+    if ES_API_KEY:
+        return AsyncElasticsearch(ES_HOST, api_key=ES_API_KEY)
     return AsyncElasticsearch(ES_HOST)
 
 es = _make_es_client()
@@ -42,9 +44,9 @@ _stars_path = os.path.join(os.path.dirname(__file__), '..', 'pipeline', 'stars.j
 async def stars_json():
     if os.path.exists(_stars_path):
         return FileResponse(_stars_path, media_type="application/json")
-    raise HTTPException(status_code=404, detail="stars.json not yet generated — run the pipeline first")
+    raise HTTPException(status_code=404, detail="stars.json not yet generated - run the pipeline first")
 
-# ── Route factory — registers each route at both /xxx and /api/xxx ────────────
+# ── Route factory - registers each route at both /xxx and /api/xxx ────────────
 def _make_router(prefix: str) -> APIRouter:
     router = APIRouter(prefix=prefix)
 
@@ -75,7 +77,7 @@ def _make_router(prefix: str) -> APIRouter:
 
     @router.get("/stars")
     async def stars_dynamic(cluster: Optional[str] = Query(None)):
-        """Live star list from ES — always reflects the full current index."""
+        """Live star list from ES - always reflects the full current index."""
         try:
             data = await es_search.get_all_stars(es, cluster=cluster)
             return [s.model_dump() for s in data]

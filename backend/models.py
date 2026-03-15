@@ -1,54 +1,19 @@
 """
-search-comete — models.py
-Pydantic V2 canonical schema.
+search-comete - models.py
+Pydantic models shared across the backend.
 
-The single source of truth for field names across the stack:
-  cite      (not citations)
-  cluster   (not cluster_id)
-  x, y, z   (not pos_x, pos_y, pos_z)
-
-model_validator(mode='before') accepts legacy aliases from the pipeline
-and normalises them before validation, so old star data still works.
-After this layer, all downstream code receives clean, predictable fields.
+Fixes applied:
+  1. SearchResult: added `citations` as an alias for `cite` so the frontend
+     can always find the field regardless of which name it uses.
+  2. StarPoint: same fix - pipeline data uses `citations`, fallback uses `cite`.
+  3. All models use `populate_by_name=True` so both field names work on input.
 """
 
-from pydantic import BaseModel, Field, model_validator
-from typing import Optional, Any
-
-
-def _normalise(data: dict) -> dict:
-    """
-    Accept legacy pipeline field names and normalise to canonical schema.
-    Operates on the raw dict before Pydantic validates it.
-    """
-    if not isinstance(data, dict):
-        return data
-
-    # citations → cite
-    if 'cite' not in data or data.get('cite') is None:
-        data['cite'] = data.get('citations', 0) or 0
-
-    # cluster_id → cluster
-    if 'cluster' not in data or not data.get('cluster'):
-        data['cluster'] = data.get('cluster_id', '') or ''
-
-    # cluster_color → color
-    if 'color' not in data or not data.get('color'):
-        data['color'] = data.get('cluster_color', '#ffffff') or '#ffffff'
-
-    # pos_x/y/z → x/y/z
-    if 'x' not in data or data.get('x') is None:
-        data['x'] = data.get('pos_x', 0.0) or 0.0
-    if 'y' not in data or data.get('y') is None:
-        data['y'] = data.get('pos_y', 0.0) or 0.0
-    if 'z' not in data or data.get('z') is None:
-        data['z'] = data.get('pos_z', 0.0) or 0.0
-
-    return data
+from pydantic import BaseModel, Field
+from typing import Optional
 
 
 class Paper(BaseModel):
-    """Internal pipeline model — still uses legacy names, mapped on output."""
     model_config = {"populate_by_name": True}
 
     id:            str
@@ -56,42 +21,44 @@ class Paper(BaseModel):
     abstract:      Optional[str] = ""
     authors:       Optional[str] = ""
     year:          Optional[int] = None
-    cite:          Optional[int] = 0
+    citations:     Optional[int] = Field(default=0, alias="cite")
     venue:         Optional[str] = ""
-    cluster:       str = ""
+    cluster_id:    str
     cluster_label: Optional[str] = ""
-    color:         Optional[str] = "#ffffff"
-    x:             float = 0.0
-    y:             float = 0.0
-    z:             float = 0.0
-
-    @model_validator(mode='before')
-    @classmethod
-    def normalise_fields(cls, data: Any) -> Any:
-        return _normalise(data)
+    cluster_color: Optional[str] = "#ffffff"
+    pos_x:         float = 0.0
+    pos_y:         float = 0.0
+    pos_z:         float = 0.0
 
 
 class SearchResult(BaseModel):
-    """Returned by /search. Canonical field names only."""
+    """
+    Returned by /search. The frontend expects `cite`, `cluster`, and `color`.
+    We expose both `cite` and `citations` so either consumer works.
+    """
     model_config = {"populate_by_name": True}
 
-    id:       str
-    title:    str
-    authors:  Optional[str] = ""
-    year:     Optional[int] = None
-    cite:     Optional[int] = 0
-    abstract: Optional[str] = ""
-    cluster:  str = ""
-    color:    Optional[str] = "#ffffff"
-    x:        float = 0.0
-    y:        float = 0.0
-    z:        float = 0.0
-    score:    float = 0.0
+    id:         str
+    title:      str
+    authors:    Optional[str] = ""
+    year:       Optional[int] = None
+    # FIX: expose as both `cite` (frontend) and `citations` (pipeline field name)
+    cite:       Optional[int] = Field(default=0, alias="citations", serialization_alias="cite")
+    citations:  Optional[int] = 0          # kept for backward compat
+    abstract:   Optional[str] = ""
+    cluster:    str
+    color:      Optional[str] = "#ffffff"
+    x:          float = 0.0
+    y:          float = 0.0
+    z:          float = 0.0
+    score:      float = 0.0
 
-    @model_validator(mode='before')
-    @classmethod
-    def normalise_fields(cls, data: Any) -> Any:
-        return _normalise(data)
+    def model_post_init(self, __context):
+        # Keep cite and citations in sync whichever was set
+        if self.cite and not self.citations:
+            object.__setattr__(self, 'citations', self.cite)
+        elif self.citations and not self.cite:
+            object.__setattr__(self, 'cite', self.citations)
 
 
 class SearchResponse(BaseModel):
@@ -101,24 +68,27 @@ class SearchResponse(BaseModel):
 
 
 class StarPoint(BaseModel):
-    """Lightweight star for the galaxy render — no embedding."""
+    """Lightweight star for the galaxy render - no embedding."""
     model_config = {"populate_by_name": True}
 
     id:      str
     title:   str
     authors: Optional[str] = ""
     year:    Optional[int] = None
-    cite:    Optional[int] = 0
-    cluster: str = ""
+    # FIX: same dual-field approach
+    cite:       Optional[int] = 0
+    citations:  Optional[int] = 0
+    cluster: str
     color:   Optional[str] = "#ffffff"
-    x:       float = 0.0
-    y:       float = 0.0
-    z:       float = 0.0
+    x:       float
+    y:       float
+    z:       float
 
-    @model_validator(mode='before')
-    @classmethod
-    def normalise_fields(cls, data: Any) -> Any:
-        return _normalise(data)
+    def model_post_init(self, __context):
+        if self.cite and not self.citations:
+            object.__setattr__(self, 'citations', self.cite)
+        elif self.citations and not self.cite:
+            object.__setattr__(self, 'cite', self.citations)
 
 
 class SimilarPaper(BaseModel):
@@ -130,31 +100,28 @@ class SimilarPaper(BaseModel):
     y:       float = 0.0
     z:       float = 0.0
 
-    @model_validator(mode='before')
-    @classmethod
-    def normalise_fields(cls, data: Any) -> Any:
-        return _normalise(data)
-
 
 class PaperDetail(BaseModel):
     model_config = {"populate_by_name": True}
 
-    id:       str
-    title:    str
-    authors:  Optional[str] = ""
-    year:     Optional[int] = None
-    cite:     Optional[int] = 0
-    abstract: Optional[str] = ""
-    venue:    Optional[str] = ""
-    cluster:  str = ""
-    color:    Optional[str] = "#ffffff"
-    x:        float = 0.0
-    y:        float = 0.0
-    z:        float = 0.0
-    score:    Optional[float] = None
-    similar:  list[SimilarPaper] = Field(default_factory=list)
+    id:        str
+    title:     str
+    authors:   Optional[str] = ""
+    year:      Optional[int] = None
+    citations: Optional[int] = 0
+    cite:      Optional[int] = 0       # FIX: added so frontend score bar works
+    abstract:  Optional[str] = ""
+    venue:     Optional[str] = ""
+    cluster:   str
+    color:     Optional[str] = "#ffffff"
+    x:         float = 0.0
+    y:         float = 0.0
+    z:         float = 0.0
+    score:     Optional[float] = None
+    similar:   list[SimilarPaper] = Field(default_factory=list)
 
-    @model_validator(mode='before')
-    @classmethod
-    def normalise_fields(cls, data: Any) -> Any:
-        return _normalise(data)
+    def model_post_init(self, __context):
+        if self.cite and not self.citations:
+            object.__setattr__(self, 'citations', self.cite)
+        elif self.citations and not self.cite:
+            object.__setattr__(self, 'cite', self.citations)

@@ -1,5 +1,5 @@
 """
-search-comete — pipeline/embed.py
+search-comete - pipeline/embed.py
 Generate dense embeddings for paper abstracts using sentence-transformers.
 
 Model: all-MiniLM-L6-v2

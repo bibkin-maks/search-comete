@@ -1,6 +1,6 @@
 """
 pipeline/export_stars.py
-Quick utility — exports stars.json directly from Elasticsearch.
+Quick utility - exports stars.json directly from Elasticsearch.
 Run this if you already have all papers in ES but stars.json is incomplete.
 
 Usage:
@@ -24,7 +24,7 @@ def main():
 
     try:
         info = es.info()
-        print(f"Connected — ES version {info['version']['number']}")
+        print(f"Connected - ES version {info['version']['number']}")
     except Exception as e:
         print(f"Cannot connect to Elasticsearch: {e}")
         print("Make sure Elasticsearch is running on port 9200.")

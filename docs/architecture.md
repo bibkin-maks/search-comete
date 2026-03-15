@@ -1,11 +1,11 @@
-# search-comete — Architecture
+# search-comete - Architecture
 
 ## Overview
 
 ```
 search-comete/
-├── frontend/          # Vite + Three.js — the 3D galaxy UI
-├── backend/           # FastAPI — search API over Elasticsearch
+├── frontend/          # Vite + Three.js - the 3D galaxy UI
+├── backend/           # FastAPI - search API over Elasticsearch
 ├── pipeline/          # One-time data processing: fetch → embed → UMAP → index
 └── docs/              # This file
 ```
@@ -16,27 +16,27 @@ search-comete/
 Semantic Scholar API / arXiv
         │
         ▼
-  pipeline/fetch.py       — HTTP → structured paper dicts
+  pipeline/fetch.py       - HTTP → structured paper dicts
         │
         ▼
-  pipeline/embed.py       — sentence-transformers → (N, 384) float32 array
+  pipeline/embed.py       - sentence-transformers → (N, 384) float32 array
         │
         ▼
-  pipeline/umap_reduce.py — UMAP → (N, 3) x/y/z coords
+  pipeline/umap_reduce.py - UMAP → (N, 3) x/y/z coords
         │
-        ├──► pipeline/stars.json   — lightweight positions for frontend
+        ├──► pipeline/stars.json   - lightweight positions for frontend
         │
-        └──► Elasticsearch index   — full docs + embeddings for kNN search
+        └──► Elasticsearch index   - full docs + embeddings for kNN search
                     │
                     ▼
-             backend/main.py       — FastAPI routes
-             backend/search.py     — ES query logic
+             backend/main.py       - FastAPI routes
+             backend/search.py     - ES query logic
                     │
                     ▼
-             frontend/src/main.js  — loads stars, wires UI
-             frontend/src/galaxy.js — Three.js scene
-             frontend/src/search.js — search → highlight stars
-             frontend/src/panel.js  — detail panel
+             frontend/src/main.js  - loads stars, wires UI
+             frontend/src/galaxy.js - Three.js scene
+             frontend/src/search.js - search → highlight stars
+             frontend/src/panel.js  - detail panel
 ```
 
 ## Elasticsearch index: `knowledge_galaxy`
@@ -64,18 +64,18 @@ Semantic Scholar API / arXiv
 ## Running locally
 
 ```bash
-# 1 — Elasticsearch
+# 1 - Elasticsearch
 docker compose up elasticsearch
 
-# 2 — Pipeline (test run: 20 papers/topic ≈ 5 min)
+# 2 - Pipeline (test run: 20 papers/topic ≈ 5 min)
 pip install -r pipeline/requirements.txt
 python -m pipeline.run --limit 20
 
-# 3 — Backend
+# 3 - Backend
 pip install -r backend/requirements.txt
 uvicorn backend.main:app --reload --port 8000
 
-# 4 — Frontend
+# 4 - Frontend
 cd frontend
 npm install
 npm run dev

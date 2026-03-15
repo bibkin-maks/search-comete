@@ -1,10 +1,10 @@
 """
-search-comete — pipeline/fetch.py
+search-comete - pipeline/fetch.py
 Fetch papers from OpenAlex (default), arXiv, or Semantic Scholar.
 
 Rate limit summary:
   - OpenAlex:         FREE, no key, 100k req/day, polite pool = no throttling.
-                      RECOMMENDED — set OPENALEX_EMAIL env var for priority pool.
+                      RECOMMENDED - set OPENALEX_EMAIL env var for priority pool.
   - arXiv:            Free, no key. Can get 429 on fast bulk runs. Use 3s sleep.
   - Semantic Scholar: Free but strict 1 req/s. Set SS_API_KEY for 10 req/s.
 """
@@ -24,7 +24,7 @@ OPENALEX_EMAIL = os.getenv("OPENALEX_EMAIL", "")
 
 def fetch_openalex(query: str, limit: int = 200) -> list[dict]:
     """
-    Pull papers from OpenAlex — the best free academic API.
+    Pull papers from OpenAlex - the best free academic API.
     250M+ papers, no rate limits with polite pool, no key required.
     Tip: set OPENALEX_EMAIL=your@email.com env var for priority access.
     Docs: https://docs.openalex.org/
@@ -47,13 +47,13 @@ def fetch_openalex(query: str, limit: int = 200) -> list[dict]:
             r = requests.get(OPENALEX_URL, params=params, timeout=20)
 
             if r.status_code == 429:
-                print(f"    [OpenAlex] Rate limited — sleeping 30s…")
+                print(f"    [OpenAlex] Rate limited - sleeping 30s…")
                 time.sleep(30)
                 consecutive_errors += 1
                 continue
 
             if r.status_code != 200:
-                print(f"    [OpenAlex] HTTP {r.status_code} — retrying…")
+                print(f"    [OpenAlex] HTTP {r.status_code} - retrying…")
                 time.sleep(5)
                 consecutive_errors += 1
                 if consecutive_errors >= 3:
@@ -102,7 +102,7 @@ def fetch_openalex(query: str, limit: int = 200) -> list[dict]:
             time.sleep(0.12)  # OpenAlex polite pool is very generous
 
         except requests.exceptions.Timeout:
-            print(f"    [OpenAlex] Timeout — retrying…")
+            print(f"    [OpenAlex] Timeout - retrying…")
             time.sleep(5)
             consecutive_errors += 1
             if consecutive_errors >= 3:
@@ -151,7 +151,7 @@ def fetch_semantic_scholar(query: str, limit: int = 200) -> list[dict]:
 
             if r.status_code == 429:
                 wait = min(120, 30 * (2 ** consecutive_errors))
-                print(f"    [SS] Rate limited — sleeping {wait}s…")
+                print(f"    [SS] Rate limited - sleeping {wait}s…")
                 time.sleep(wait)
                 consecutive_errors += 1
                 continue
@@ -206,7 +206,7 @@ def fetch_arxiv(query: str, limit: int = 200) -> list[dict]:
             }, timeout=20)
 
             if r.status_code == 429:
-                print(f"    [arXiv] Rate limited — sleeping 60s…")
+                print(f"    [arXiv] Rate limited - sleeping 60s…")
                 time.sleep(60)
                 continue
 
@@ -245,7 +245,7 @@ def fetch_arxiv(query: str, limit: int = 200) -> list[dict]:
             start += batch
             if len(entries) < batch:
                 break
-            time.sleep(3.0)  # conservative — arXiv asks for 3s between requests
+            time.sleep(3.0)  # conservative - arXiv asks for 3s between requests
 
         except ET.ParseError:
             start += batch

@@ -13,7 +13,7 @@ Fixes applied:
 """
 
 from elasticsearch import AsyncElasticsearch
-from models import SearchResult, StarPoint, SimilarPaper, PaperDetail
+from models import SearchResult, StarPoint, SimilarPaper, PaperDetail, LoreResponse
 
 INDEX = "knowledge_galaxy"
 
@@ -73,6 +73,99 @@ async def text_search(
             score      = round(h["_score"] / max_score, 3),
         ))
     return resp["hits"]["total"]["value"], results
+
+
+async def rrf_search(
+    es: AsyncElasticsearch,
+    query: str,
+    size: int = 20,
+    cluster: str | None = None,
+) -> tuple[str, int, list[SearchResult]]:
+    """
+    Hybrid search using Reciprocal Rank Fusion (RRF).
+    Combines BM25 (text) and kNN (vector) results.
+    Returns (mode, total, results).
+    """
+    # 1. Get raw BM25 results
+    total_text, text_results = await text_search(es, query, size=size*2, cluster=cluster)
+    
+    # 2. Extract embedding from top hit (or use a dedicated embedding service if available)
+    # For this demo, we use the embedding of the best text match if it has one.
+    embedding = []
+    if text_results:
+        best_id = text_results[0].id
+        best_paper = await get_paper_with_similar(es, best_id, k=0)
+        if best_paper:
+             # We need the raw source for embedding - get_paper_with_similar excludes it
+             raw = await es.get(index=INDEX, id=doc_id_from_paper_id(best_id))
+             embedding = raw["_source"].get("embedding", [])
+
+    if not embedding:
+        # Fallback to pure text search if no embedding found
+        return "text", total_text, text_results[:size]
+
+    # 3. Get kNN results
+    knn_body = {
+        "knn": {
+            "field": "embedding",
+            "query_vector": embedding,
+            "k": size * 2,
+            "num_candidates": 100,
+        },
+        "_source": {"excludes": ["embedding"]},
+    }
+    if cluster:
+        knn_body["knn"]["filter"] = {"term": {"cluster_id": cluster}}
+
+    knn_resp = await es.search(index=INDEX, body=knn_body)
+    knn_hits = knn_resp["hits"]["hits"]
+    
+    # 4. RRF Logic
+    # score = sum( 1 / (k + rank) )
+    K = 60
+    scores = {} # id -> rrf_score
+    docs = {}   # id -> SearchResult
+    
+    # Rank BM25
+    for rank, res in enumerate(text_results):
+        scores[res.id] = scores.get(res.id, 0) + (1.0 / (K + rank + 1))
+        docs[res.id] = res
+        
+    # Rank kNN
+    for rank, hit in enumerate(knn_hits):
+        s = hit["_source"]
+        pid = s["id"]
+        scores[pid] = scores.get(pid, 0) + (1.0 / (K + rank + 1))
+        if pid not in docs:
+            cite_val = s.get("citations", 0) or s.get("cite", 0) or 0
+            docs[pid] = SearchResult(
+                id=pid, title=s["title"], authors=s.get("authors", ""),
+                year=s.get("year"), cite=cite_val, citations=cite_val,
+                abstract=s.get("abstract", ""),
+                cluster=s.get("cluster_id", s.get("cluster", "")),
+                color=s.get("cluster_color", s.get("color", "#ffffff")),
+                x=s.get("pos_x", s.get("x", 0.0)),
+                y=s.get("pos_y", s.get("y", 0.0)),
+                z=s.get("pos_z", s.get("z", 0.0)),
+                score=0.0 # will update below
+            )
+
+    # 5. Sort by RRF score
+    sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+    final_results = []
+    max_rrf = scores[sorted_ids[0]] if sorted_ids else 1.0
+    
+    for pid in sorted_ids[:size]:
+        res = docs[pid]
+        res.score = round(scores[pid] / max_rrf, 3)
+        final_results.append(res)
+        
+    return "hybrid", len(sorted_ids), final_results
+
+def doc_id_from_paper_id(paper_id: str) -> str:
+    # Most paper IDs in the galaxy are arxiv URLs or similar. 
+    # ES _id is usually the same.
+    return paper_id
 
 
 async def get_all_stars(
@@ -242,3 +335,22 @@ async def get_cluster_stats(es: AsyncElasticsearch) -> dict:
             "total_cites": int(b["total_cites"]["value"]),
         })
     return {"clusters": clusters}
+
+
+async def get_lore(cluster: str) -> LoreResponse:
+    """Thematic generator for cluster 'lore'."""
+    LORE = {
+        "ml": "A dense neural collective, pulsing with the weight of trillion-parameter optimization. Here, logic is not written, but grown in the fertile silicon of the Noosphere.",
+        "cs": "The digital foundation. Architectures of pure reason where abstract algorithms manifest as the very physics of our reality.",
+        "math": "The realm of absolute truth. Geometric symmetries and axiomatic structures that exist independent of time, space, or observer.",
+        "phys": "Where the abstract meets the iron laws of nature. A high-energy dance of particles and fields probing the absolute limits of the measurable.",
+        "bio": "The code of life. Swirling helices of carbon and information, mapping the fundamental blueprints of organic vitality.",
+        "chem": "Molecular alchemy. The study of bonds and breaks, where the rearrangement of atoms defines the potential of material existence.",
+        "astro": "The cosmic scale. Infinite voids and stellar nurseries, tracking the history of the universe through the light of ancient stars.",
+        "med": "The study of the fragile vessel. Clinical insights and biological interventions aimed at preserving the flicker of consciousness.",
+        "econ": "The flows of value and incentive. Modeling the collective behavior of agents in a world of finite resources and infinite desire.",
+        "psych": "The interior landscape. Mapping the neural architecture of thought, emotion, and the emergent mystery of the self.",
+    }
+    fallback = "A dense cluster of human knowledge, emitting the faint heat of collective intellectual labor. Its exact signature remains partially obscured."
+    desc = LORE.get(cluster.lower().strip(), fallback)
+    return LoreResponse(cluster=cluster, description=desc)

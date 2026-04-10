@@ -35,12 +35,14 @@ import {
 
 // COMET ADDITION: these four functions need to be added to galaxy.js (see galaxy-comet-patch.md).
 // Imported dynamically so the app still boots if galaxy.js hasn't been patched yet.
-let getScene, getCamera, getRaycaster, registerFrameHook;
-import('./galaxy.js').then(mod => {
+let getScene, getCamera, getRaycaster, registerFrameHook, getRenderer;
+const galaxyModulePromise = import('./galaxy.js').then(mod => {
   getScene           = mod.getScene;
   getCamera          = mod.getCamera;
   getRaycaster       = mod.getRaycaster;
   registerFrameHook  = mod.registerFrameHook;
+  getRenderer        = mod.getRenderer;
+  return mod;
 });
 import { doSearch, setSearchCorpus } from './search.js';
 import { showDetail, closeDetail, setCorpus } from './panel.js';
@@ -50,6 +52,8 @@ import { initComets, tickComets, raycastComets, updateCorpus as updateCometCorpu
 // SOUND + WORMHOLE ADDITIONS
 import { initSound, playWarp, playStarClick, playCometAppear, playCometClick } from './sound.js';
 import { initWormhole } from './wormhole.js';
+// ORB ADDITION
+import { initOrbs, updateOrbs } from './orb.js';
 
 // ── Inject UI HTML ────────────────────────────────────────────────────────────
 document.getElementById('app').innerHTML = `
@@ -100,6 +104,7 @@ document.getElementById('app').innerHTML = `
 <div id="detail-panel">
   <button id="detail-close">✕</button>
   <div id="detail-category"></div>
+  <div id="detail-lore"></div>
   <div id="detail-title"></div>
   <div id="detail-authors"></div>
   <div id="detail-year"></div>
@@ -129,8 +134,35 @@ document.getElementById('app').innerHTML = `
 <div id="galaxy-loader">
   <div class="loader-inner">
     <div class="loader-title">search<em>·comète</em></div>
-    <div class="loader-bar-wrap"><div class="loader-bar"></div></div>
-    <div class="loader-label">Mapping the universe…</div>
+    <div class="loader-bar-wrap"><div class="loader-bar" id="loader-bar-fill"></div></div>
+    <div class="loader-label" id="loader-status">Mapping the universe…</div>
+  </div>
+</div>
+
+<div id="settings-trigger">⚙</div>
+<div id="settings-panel">
+  <div class="settings-header">SYSTEM CONTROLS</div>
+  <div class="settings-group">
+    <div class="settings-label">Visual Quality</div>
+    <select id="quality-select">
+      <option value="high">High (Full Shaders)</option>
+      <option value="medium">Medium (No Morph)</option>
+      <option value="low">Low (Mobile/Static)</option>
+    </select>
+  </div>
+  <div class="settings-group">
+    <div class="settings-label">Accessibility</div>
+    <label class="switch-wrap">
+      <input type="checkbox" id="reduced-motion-toggle">
+      <span class="switch-label">Reduced Motion</span>
+    </label>
+    <label class="switch-wrap">
+      <input type="checkbox" id="high-contrast-toggle">
+      <span class="switch-label">High Contrast</span>
+    </label>
+  </div>
+  <div class="settings-group">
+    <div id="fps-counter">FPS: --</div>
   </div>
 </div>
 `;
@@ -279,11 +311,11 @@ html, body { width: 100%; height: 100%; background: var(--ink); color: var(--pap
   cursor: pointer;
   border-radius: 2px;
   transition: background 0.15s, border-color 0.15s;
-}
 .detail-action-btn:hover {
   background: rgba(201,168,76,0.08);
   border-color: rgba(201,168,76,0.35);
 }
+#detail-lore { font-family:var(--mono); font-size:9px; font-style:italic; border-bottom:0.5px solid rgba(245,242,235,0.05); padding-bottom:12px; margin-bottom:14px; color:rgba(245,242,235,0.4); line-height:1.6; }
 #detail-abstract { font-family:var(--serif); font-size:13px; font-style:italic; line-height:1.75; color:rgba(245,242,235,0.65); border-left:1.5px solid rgba(201,168,76,0.25); padding-left:14px; margin-top:4px; }
 #detail-score { display:flex; align-items:center; gap:10px; margin-top:4px; }
 .score-bar-wrap { flex:1; height:3px; background:rgba(245,242,235,0.08); border-radius:2px; overflow:hidden; }
@@ -307,9 +339,25 @@ html, body { width: 100%; height: 100%; background: var(--ink); color: var(--pap
 .loader-title { font-family:var(--display); font-size:28px; font-weight:800; letter-spacing:-0.02em; color:var(--paper); }
 .loader-title em { font-style:normal; color:var(--gold); }
 .loader-bar-wrap { width:240px; height:2px; background:rgba(245,242,235,0.08); border-radius:2px; overflow:hidden; }
-.loader-bar { height:100%; width:0%; background:var(--gold); border-radius:2px; animation:load-progress 2s ease-in-out forwards; }
-@keyframes load-progress { 0%{width:0%} 60%{width:75%} 90%{width:92%} 100%{width:100%} }
+.loader-bar { height:100%; width:0%; background:var(--gold); border-radius:2px; transition: width 0.3s ease; }
 .loader-label { font-family:var(--mono); font-size:10px; letter-spacing:0.15em; color:rgba(245,242,235,0.3); text-transform:uppercase; }
+
+/* Settings */
+#settings-trigger { position:fixed; top:24px; right:24px; z-index:35; font-size:20px; cursor:pointer; opacity:0.5; transition:opacity 0.2s, transform 0.3s; pointer-events: auto; }
+#settings-trigger:hover { opacity:1; transform:rotate(90deg); }
+#settings-panel { position:fixed; top:64px; right:24px; width:220px; background:rgba(10,10,18,0.95); border:0.5px solid rgba(245,242,235,0.15); border-radius:4px; padding:16px; z-index:35; display:none; flex-direction:column; gap:16px; backdrop-filter:blur(10px); pointer-events: auto; }
+#settings-panel.open { display:flex; }
+.settings-header { font-family:var(--mono); font-size:9px; letter-spacing:0.15em; color:var(--gold); border-bottom:0.5px solid rgba(245,242,235,0.1); padding-bottom:8px; }
+.settings-group { display:flex; flex-direction:column; gap:8px; }
+.settings-label { font-family:var(--mono); font-size:8px; color:rgba(245,242,235,0.4); text-transform:uppercase; }
+#quality-select { background:rgba(245,242,235,0.05); border:0.5px solid rgba(245,242,235,0.2); color:var(--paper); font-family:var(--mono); font-size:10px; padding:6px; outline:none; }
+.switch-wrap { display:flex; align-items:center; gap:8px; cursor:pointer; }
+.switch-label { font-family:var(--mono); font-size:10px; color:var(--paper); }
+#fps-counter { font-family:var(--mono); font-size:9px; color:rgba(245,242,235,0.3); }
+
+/* High Contrast mode */
+body.high-contrast .wordmark, body.high-contrast #detail-title { color:#fff !important; text-shadow: 0 0 10px rgba(255,255,255,0.5); }
+body.high-contrast #canvas { filter: saturate(1.5) contrast(1.2); }
 `;
 document.head.appendChild(style);
 
@@ -679,8 +727,96 @@ function _onCometClick(comet) {
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
-loadStars().then(stars => {
+// ── Settings & Performance ────────────────────────────────────────────────────
+
+function initSettings() {
+  const trigger = document.getElementById('settings-trigger');
+  const panel = document.getElementById('settings-panel');
+  const quality = document.getElementById('quality-select');
+  const motion = document.getElementById('reduced-motion-toggle');
+  const contrast = document.getElementById('high-contrast-toggle');
+
+  trigger.onclick = () => panel.classList.toggle('open');
+
+  // Load saved settings
+  const saved = JSON.parse(localStorage.getItem('search-comete-settings') || '{}');
+  if (saved.quality) quality.value = saved.quality;
+  if (saved.reducedMotion) motion.checked = saved.reducedMotion;
+  if (saved.highContrast) contrast.checked = saved.highContrast;
+  
+  const applySettings = () => {
+    document.body.classList.toggle('high-contrast', contrast.checked);
+    const settings = {
+      quality: quality.value,
+      reducedMotion: motion.checked,
+      highContrast: contrast.checked
+    };
+    localStorage.setItem('search-comete-settings', JSON.stringify(settings));
+    window.dispatchEvent(new CustomEvent('settings:changed', { detail: settings }));
+  };
+
+  [quality, motion, contrast].forEach(el => el.onchange = applySettings);
+  applySettings();
+}
+
+function initFPSMonitor() {
+  let frameCount = 0;
+  let lastTime = performance.now();
+  const counter = document.getElementById('fps-counter');
+
+  registerFrameHook(() => {
+    frameCount++;
+    const now = performance.now();
+    if (now - lastTime >= 1000) {
+      const fps = Math.round((frameCount * 1000) / (now - lastTime));
+      counter.textContent = `FPS: ${fps}`;
+      
+      // Auto-quality adjustment if FPS is consistently low
+      if (fps < 40 && document.getElementById('quality-select').value === 'high') {
+         console.warn('[main] Low performance detected, suggesting quality reduction');
+      }
+
+      frameCount = 0;
+      lastTime = now;
+    }
+  });
+}
+
+async function shaderWarmup() {
+  const status = document.getElementById('loader-status');
+  const bar = document.getElementById('loader-bar-fill');
+  
+  status.textContent = 'Heating up anomalies…';
+  bar.style.width = '70%';
+
+  // Re-run animation loop once with a huge delta to force-compile everything
+  const scene = getScene();
+  const camera = getCamera();
+  const renderer = getRenderer();
+  
+  if (renderer && scene && camera) {
+    renderer.compile(scene, camera);
+  }
+  
+  await new Promise(r => setTimeout(r, 500));
+  bar.style.width = '100%';
+  status.textContent = 'Universe Stabilized.';
+}
+
+loadStars().then(async stars => {
+  initSettings();
   initGalaxy(document.getElementById('canvas'), stars);
+  
+  // Wait for dynamic imports to complete
+  await galaxyModulePromise;
+  
+  // Get references for comet and orb systems
+  const scene = getScene?.();
+  const camera = getCamera?.();
+  const renderer = getRenderer?.();
+  
+  initFPSMonitor();
+  await shaderWarmup();
   document.getElementById('star-count').textContent = `${stars.length} PAPERS INDEXED`;
 
   buildMeteorFact(stars);
@@ -718,16 +854,21 @@ loadStars().then(stars => {
   // Rebuild legend after initGalaxy so CLUSTER_COLORS is populated
   requestAnimationFrame(() => _buildLegend(stars));
 
+  // ORB ADDITION: initialize orb system
+  if (scene && camera && renderer) {
+    initOrbs(scene, camera, renderer);
+  }
+
   // ── COMET ADDITION: initialise comet system ───────────────────────────────
   const canvas  = document.getElementById('canvas');
-  const scene   = getScene?.();
-  const camera  = getCamera?.();
 
   if (scene && camera) {
     initComets(scene, camera, stars, _onCometClick, setPivotTarget);
 
     // Tick comets every frame via galaxy's frame hook
     registerFrameHook?.(delta => tickComets(delta));
+    // ORB ADDITION: update orbs every frame
+    registerFrameHook?.(() => updateOrbs());
 
     // Comet click detection - runs after galaxy's own click handler
     canvas.addEventListener('click', () => {

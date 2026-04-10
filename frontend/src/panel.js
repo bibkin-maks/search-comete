@@ -13,6 +13,7 @@
  */
 
 import { flyTo, getRemappedPos, togglePinned, isPinned } from './galaxy.js';
+import { getLore } from './search.js';
 
 
 // Full corpus - set by main.js via setCorpus() after stars load
@@ -88,6 +89,13 @@ export function showDetail(paper) {
   document.getElementById('detail-year').textContent    =
     `${paper.year || ''}  ·  ${_getCite(paper).toLocaleString()} citations`;
   document.getElementById('detail-abstract').textContent = paper.abstract || '-';
+
+  // AI Lore
+  const loreBox = document.getElementById('detail-lore');
+  loreBox.textContent = 'Deciphering cluster signature…';
+  getLore(paper.cluster).then(txt => {
+    loreBox.textContent = txt;
+  });
 
   const score = paper.score !== undefined ? paper.score : 0.5 + Math.random() * 0.4;
   document.getElementById('score-bar').style.width      = Math.round(score * 100) + '%';

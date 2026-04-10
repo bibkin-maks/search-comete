@@ -11,7 +11,7 @@ from elasticsearch import AsyncElasticsearch
 from typing import Optional
 import os
 
-from models import SearchResponse, PaperDetail
+from models import SearchResponse, PaperDetail, LoreResponse
 import search as es_search
 
 app = FastAPI(title="search-comete API — Noosphere Edition", version="0.2.0")
@@ -24,18 +24,32 @@ app.add_middleware(
 )
 
 # ── Elasticsearch client ──────────────────────────────────────────────────────
-ES_HOST     = os.getenv("ES_HOST",     "http://localhost:9200")
+# Default to host.docker.internal for Windows/Mac Docker Desktop users to reach the host ES.
+# For Linux/Server, override with ES_HOST environment variable.
+ES_HOST     = os.getenv("ES_HOST",     "http://host.docker.internal:9200")
 ES_CLOUD_ID = os.getenv("ES_CLOUD_ID", "")
 ES_API_KEY  = os.getenv("ES_API_KEY",  "")
 
 def _make_es_client() -> AsyncElasticsearch:
+    headers = {"Accept": "application/vnd.elasticsearch+json; compatible-with=8"}
     if ES_CLOUD_ID and ES_API_KEY:
-        return AsyncElasticsearch(cloud_id=ES_CLOUD_ID, api_key=ES_API_KEY)
+        return AsyncElasticsearch(cloud_id=ES_CLOUD_ID, api_key=ES_API_KEY, headers=headers)
     if ES_API_KEY:
-        return AsyncElasticsearch(ES_HOST, api_key=ES_API_KEY)
-    return AsyncElasticsearch(ES_HOST)
+        return AsyncElasticsearch(ES_HOST, api_key=ES_API_KEY, headers=headers)
+    return AsyncElasticsearch(ES_HOST, headers=headers)
 
 es = _make_es_client()
+
+@app.on_event("startup")
+async def startup_event():
+    print(f"🚀 [backend] Startup: Connecting to Elasticsearch at {ES_HOST}")
+    try:
+        info = await es.info()
+        print(f"✅ [backend] Connected to ES! Version: {info['version']['number']}")
+    except Exception as e:
+        print(f"❌ [backend] CRITICAL: Could not connect to ES at {ES_HOST}: {e}")
+        if "localhost" in ES_HOST or "127.0.0.1" in ES_HOST:
+            print("💡 HINT: You are running in Docker. Use ES_HOST=http://host.docker.internal:9200")
 
 # ── Static stars.json ─────────────────────────────────────────────────────────
 _stars_path = os.path.join(os.path.dirname(__file__), '..', 'pipeline', 'stars.json')
@@ -56,9 +70,12 @@ def _make_router(prefix: str) -> APIRouter:
             info = await es.info()
             return {"status": "ok", "es_version": info["version"]["number"]}
         except Exception as e:
-            return {"status": "degraded", "error": str(e)}
+            hint = ""
+            if "localhost" in ES_HOST or "127.0.0.1" in ES_HOST:
+                hint = " [HINT: If running in Docker, you likely need to set ES_HOST to http://host.docker.internal:9200]"
+            return {"status": "degraded", "error": str(e) + hint}
 
-    @router.get("/search")
+    @router.get("/search", response_model=SearchResponse)
     async def search(
         q:       str           = Query(..., description="Search query"),
         size:    int           = Query(20, ge=1, le=100),
@@ -90,6 +107,11 @@ def _make_router(prefix: str) -> APIRouter:
         if not result:
             raise HTTPException(status_code=404, detail=f"Paper not found: {paper_id}")
         return result
+
+    @router.get("/lore", response_model=LoreResponse)
+    async def lore(cluster: str = Query(..., description="Cluster ID (e.g. ml, phys)")):
+        """Returns thematic 'AI Lore' for the requested cluster."""
+        return await es_search.get_lore(cluster)
 
     @router.get("/stats")
     async def stats():

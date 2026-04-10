@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 
 // Barrel Distortion Shader for Crucible Mode
 const LensDistortionShader = {
@@ -56,11 +57,25 @@ const LensDistortionShader = {
 
 let composer;
 let lensPass;
+let bloomPass;
 let active = false;
 
 export function initPostProcessing(renderer, scene, camera) {
+    // Enable ACES Filmic Tonemapping for better HDR handling
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.2;
+
     composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
+
+    // Add UnrealBloomPass for the neon glow
+    bloomPass = new UnrealBloomPass(
+        new THREE.Vector2(window.innerWidth, window.innerHeight),
+        0.12, // strength
+        0.5,  // radius
+        0.35  // threshold
+    );
+    composer.addPass(bloomPass);
 
     lensPass = new ShaderPass(LensDistortionShader);
     composer.addPass(lensPass);
@@ -68,27 +83,29 @@ export function initPostProcessing(renderer, scene, camera) {
 
 export function resizePostProcessing(width, height) {
     if (composer) composer.setSize(width, height);
+    if (bloomPass) bloomPass.setSize(width, height);
 }
 
 export function setCrucibleLens(enabled) {
     active = enabled;
 }
 
-export function updateAndRender(dt, renderer, scene, camera) {
+export function updateAndRender(dt, renderer, scene, camera, camDist = 200) {
     if (!composer) {
         renderer.render(scene, camera);
         return;
     }
+
+    // Adaptive Bloom: Scale strength and threshold based on camera distance
+    // Closer = stronger bloom, Farther = cleaner view
+    const distFactor = THREE.MathUtils.clamp((400 - camDist) / 380, 0, 1);
+    bloomPass.strength = THREE.MathUtils.lerp(0.02, 0.22, distFactor);
+    bloomPass.threshold = THREE.MathUtils.lerp(0.9, 0.3, distFactor);
 
     // Smoothly blend distortion in and out
     const targetDistortion = active ? 0.45 : 0.0;
     lensPass.uniforms.uDistortion.value += (targetDistortion - lensPass.uniforms.uDistortion.value) * 0.06;
     lensPass.uniforms.uTime.value += dt;
 
-    // Optimisation: if effect is fully off, just render normally
-    if (!active && lensPass.uniforms.uDistortion.value < 0.001) {
-        renderer.render(scene, camera);
-    } else {
-        composer.render();
-    }
+    composer.render();
 }

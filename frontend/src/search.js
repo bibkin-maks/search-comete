@@ -20,6 +20,17 @@ export function setSearchCorpus(stars) {
   _buildIndex();
 }
 
+// ── AI Lore Caching ───────────────────────────────────────────────────────────
+const LORE_CACHE_KEY = 'search-comete-lore-cache';
+const LORE_FALLBACKS = {
+  ml: "An intricate lattice of synthetic neurons, pulsing with the weight of trillion-parameter optimization.",
+  bio: "A swirling helix of carbon and code, mapping the fundamental blueprints of organic vitality.",
+  phys: "Matter and energy intertwined in a high-energy dance, probing the absolute limits of the measurable.",
+  cs: "Binary structures architectures of logic, where abstract algorithms manifest as digital reality.",
+  math: "Pure geometric truth, untethered from physical constraints, residing in the space of axioms.",
+  default: "A dense cluster of human knowledge, emitting the faint heat of collective intellectual labor."
+};
+
 // ── Inverted index built from the full corpus ────────────────────────────────
 // Maps lowercase token → array of { id, score } sorted by score desc
 const _index = {};
@@ -100,6 +111,34 @@ async function _checkBackend() {
     const res = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(2000) });
     return res.ok;
   } catch { return false; }
+}
+
+// ── AI Lore Generator ─────────────────────────────────────────────────────────
+
+export async function getLore(clusterId) {
+  const cache = JSON.parse(localStorage.getItem(LORE_CACHE_KEY) || '{}');
+  const cid = (clusterId || 'default').toLowerCase();
+  
+  if (cache[cid]) return cache[cid];
+
+  if (_usingBackend === false) return LORE_FALLBACKS[cid] || LORE_FALLBACKS.default;
+
+  try {
+    const res = await fetch(`${API_BASE}/lore?cluster=${encodeURIComponent(cid)}`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    const lore = data.description || LORE_FALLBACKS[cid] || LORE_FALLBACKS.default;
+    
+    // Cache the result
+    cache[cid] = lore;
+    localStorage.setItem(LORE_CACHE_KEY, JSON.stringify(cache));
+    return lore;
+  } catch (e) {
+    console.warn('[search] Lore API failed, using fallback.');
+    return LORE_FALLBACKS[cid] || LORE_FALLBACKS.default;
+  }
 }
 
 // ── Local TF-IDF search against full corpus ───────────────────────────────────

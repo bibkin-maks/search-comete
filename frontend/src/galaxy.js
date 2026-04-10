@@ -17,6 +17,7 @@
 
 import * as THREE from 'three';
 import { showDetail } from './panel.js';
+import { initPostProcessing, resizePostProcessing, updateAndRender } from './postfx.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -102,6 +103,8 @@ let starDataArray = [];
 let basePosArray;
 let edgeSegments;
 let ringMesh, ringMat;
+let instancedDisk; // New instanced mesh for accretion disks
+let instanceMapDisk = [];
 let animFrame;
 let activeYear = Infinity;
 const pinnedIds = new Set();
@@ -117,9 +120,20 @@ const mouse2D  = new THREE.Vector2();
 const raycaster = new THREE.Raycaster();
 let hoveredStarIdx = -1;
 let lastRaycast = 0;
+let reducedMotion = false;
+let qualityTier = 'high'; // 'high', 'medium', 'low'
 
-const dummy       = new THREE.Object3D();
-const _col        = new THREE.Color();
+window.addEventListener('settings:changed', (e) => {
+  const settings = e.detail;
+  reducedMotion = !!settings.reducedMotion;
+  qualityTier = settings.quality || 'high';
+  
+  // Re-apply visual state to all stars to update shader attributes if quality changed
+  if (starDataArray.length > 0) _applyVisualStateAll();
+});
+
+const dummy = new THREE.Object3D();
+const _col = new THREE.Color();
 const _floatDummy = new THREE.Object3D();
 
 // ── COMET ADDITION 1: frame hook registry ─────────────────────────────────────
@@ -158,6 +172,73 @@ function _baseColorForStar(star) {
   return CLUSTER_COLORS[star.cluster] || DEFAULT_COLOR;
 }
 
+// ── CUSTOM SHADERS ────────────────────────────────────────────────────────────
+
+const STAR_V_INJECT = `
+  attribute vec3 aMorphParams;
+  attribute vec3 aWaveParams;
+  attribute vec3 aExtraParams;
+  varying vec3 vNormalPass;
+  varying vec3 vViewPositionPass;
+  varying vec3 vInstanceColorPass;
+  varying float vDisplacementPass;
+  varying vec3 vWaveParamsPass;
+  varying vec3 vExtraParamsPass;
+  uniform float uTime;
+
+  float hash(float n) { return fract(sin(n) * 43758.5453123); }
+  float noise(vec3 x) {
+    vec3 p = floor(x); vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    float n = p.x + p.y * 57.0 + 113.0 * p.z;
+    return mix(mix(mix(hash(n + 0.0), hash(n + 1.0), f.x), mix(hash(n + 57.0), hash(n + 58.0), f.x), f.y),
+               mix(mix(hash(n + 113.0), hash(n + 114.0), f.x), mix(hash(n + 170.0), hash(n + 171.0), f.x), f.y), f.z);
+  }
+`;
+
+const STAR_F_INJECT = `
+  varying vec3 vNormalPass;
+  varying vec3 vViewPositionPass;
+  varying vec3 vInstanceColorPass;
+  varying float vDisplacementPass;
+  varying vec3 vWaveParamsPass;
+  varying vec3 vExtraParamsPass;
+  uniform float uTime;
+
+  float f_hash(vec3 p) {
+    p = fract(p * 0.3183099 + .1); p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+  }
+  float f_noise(vec3 x) {
+    vec3 i = floor(x); vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(f_hash(i + vec3(0,0,0)), f_hash(i + vec3(1,0,0)), f.x), mix(f_hash(i + vec3(0,1,0)), f_hash(i + vec3(1,1,0)), f.x), f.y),
+               mix(mix(f_hash(i + vec3(0,0,1)), f_hash(i + vec3(1,0,1)), f.x), mix(f_hash(i + vec3(0,1,1)), f_hash(i + vec3(1,1,1)), f.x), f.y), f.z);
+  }
+`;
+
+const DISK_V_INJECT = `
+  varying vec2 vUvPass;
+  varying vec3 vInstanceColorPass;
+  varying vec3 vViewPosPass;
+  uniform float uLensing;
+  uniform float uRS;
+`;
+
+const DISK_F_INJECT = `
+  varying vec2 vUvPass;
+  varying vec3 vInstanceColorPass;
+  varying vec3 vViewPosPass;
+  uniform float uTime;
+  uniform float uRS;
+  float d_hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
+  float d_noise(vec2 p) {
+    vec2 i = floor(p); vec2 f = fract(p);
+    f = f*f*(3.0-2.0*f);
+    return mix(mix(d_hash(i), d_hash(i+vec2(1.0,0.0)), f.x), mix(d_hash(i+vec2(0.0,1.0)), d_hash(i+vec2(1.0,1.0)), f.x), f.y);
+  }
+`;
+
 function _applyVisualState(entry, opts = {}) {
   const { scaleMul = 1, colorHex = null } = opts;
   const { star, tierMesh, localId, globalIdx } = entry;
@@ -171,6 +252,82 @@ function _applyVisualState(entry, opts = {}) {
 
   _col.setHex(colorHex ?? _baseColorForStar(star));
   tierMesh.setColorAt(localId, _col);
+
+  const morph = tierMesh.geometry.attributes.aMorphParams;
+  const wave  = tierMesh.geometry.attributes.aWaveParams;
+  const extra = tierMesh.geometry.attributes.aExtraParams;
+
+  const idStr = String(star.id);
+  // Simple deterministic hash based on ID string
+  let hashVal = 0;
+  for (let i = 0; i < idStr.length; i++) {
+    hashVal = ((hashVal << 5) - hashVal) + idStr.charCodeAt(i);
+    hashVal |= 0;
+  }
+  const h = Math.abs(hashVal % 1000) / 1000; // 0.0 to 1.0
+
+  if (morph) {
+    const cite = star.cite || 0;
+    if (qualityTier === 'low') {
+      morph.setXYZ(localId, 0, 0, 0); 
+    } else {
+      // 15k Stars Variation Logic:
+      // High-cite papers are more "energetic" (black holes/large stars)
+      // Small papers are a diverse mix of types
+      if (cite > 15000) {
+        morph.setXYZ(localId, 0.0, 1.0, 0.0); // Black Holes are smooth perfectly
+      } else if (cite > 5000) {
+        morph.setXYZ(localId, 0.05, 12.0, 1.0); // Major Research
+      } else if (cite > 500) {
+        morph.setXYZ(localId, 0.02, 8.0, 0.0);  // Significant
+      } else {
+        // Varieties for the masses
+        if (h > 0.98)      morph.setXYZ(localId, 1.2, 4.0, 5.0);  // "Hyper-Chaos" variant
+        else if (h > 0.92) morph.setXYZ(localId, 0.3, 6.0, 2.0);  // "Toxic" variant
+        else if (h > 0.85) morph.setXYZ(localId, 0.7, 3.0, 0.0);  // "Arcane" variant
+        else if (h > 0.75) morph.setXYZ(localId, 0.1, 10.0, 0.0); // "Pulsar" variant
+        else               morph.setXYZ(localId, 0.0, 0.0, 0.0);  // Default smooth
+      }
+    }
+    morph.needsUpdate = true;
+  }
+
+  if (wave) {
+    const cite = star.cite || 0;
+    const isBH = (cite > 15000) ? 1.0 : 0.0;
+    
+    // Vary Fresnel Power and Wave Speed
+    const fresnel = (qualityTier === 'low') ? 1.0 : (h > 0.8 ? 5.0 : 2.5);
+    const speed   = (h > 0.9) ? 6.0 : (h > 0.5 ? 2.5 : 0.8);
+    
+    wave.setXYZ(localId, fresnel, speed, isBH);
+    wave.needsUpdate = true;
+  }
+
+  if (extra) {
+    const detail = (qualityTier === 'low') ? 0.0 : (h > 0.9 ? 4.0 : (h > 0.6 ? 1.5 : 0.0));
+    const freq   = (h > 0.7) ? 25.0 : 10.0;
+    const boost  = (h > 0.95) ? 3.0 : 1.0;
+    extra.setXYZ(localId, detail, freq, boost);
+    extra.needsUpdate = true;
+  }
+
+  // Handle Accretion Disk for Black Holes
+  if (star.cite > 15000 && instancedDisk) {
+    const diskId = instanceMapDisk.indexOf(entry);
+    if (diskId !== -1) {
+      if (!_isYearVisible(star)) {
+        dummy.scale.setScalar(0);
+      } else {
+        dummy.position.set(b[globalIdx * 3], b[globalIdx * 3 + 1], b[globalIdx * 3 + 2]);
+        dummy.rotation.set(Math.PI / 2, 0, 0);
+        dummy.scale.setScalar(1.0);
+      }
+      dummy.updateMatrix();
+      instancedDisk.setMatrixAt(diskId, dummy.matrix);
+      instancedDisk.instanceMatrix.needsUpdate = true;
+    }
+  }
 }
 
 function _applyVisualStateAll() {
@@ -230,6 +387,7 @@ export function initGalaxy(canvas, stars) {
     _buildInterClusterLines(remapped);
     _buildRing();
     _bindControls(canvas);
+    initPostProcessing(renderer, scene, camera);
     cancelAnimationFrame(animFrame);
     _animate();
     hideLoader();
@@ -459,27 +617,162 @@ function _makeStarTex() {
 function _buildStars(stars) {
   starDataArray = [];
 
-  // FIX 2: Count tiers correctly after cite normalisation
   const cntS = stars.filter(s => s.cite <= 200).length;
   const cntM = stars.filter(s => s.cite > 200 && s.cite <= 5000).length;
   const cntL = stars.filter(s => s.cite > 5000).length;
 
   console.log(`[galaxy] Star tiers - small(≤200): ${cntS}, med(201-5000): ${cntM}, large(>5000): ${cntL}`);
 
-  const mat = () => new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const createMaterial = () => {
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = { value: 0 };
+      mat.userData.shader = shader; // store for updates
 
-  // Always create all three meshes with at least 1 slot to avoid null references.
-  // Extra slots beyond actual count are harmless - they'll have scale(0).
-  instancedSmall = new THREE.InstancedMesh(new THREE.SphereGeometry(0.07, 4, 4),  mat(), Math.max(1, cntS));
-  instancedMed   = new THREE.InstancedMesh(new THREE.SphereGeometry(0.13, 5, 5),  mat(), Math.max(1, cntM));
-  instancedLarge = new THREE.InstancedMesh(new THREE.SphereGeometry(0.22, 6, 6),  mat(), Math.max(1, cntL));
+      shader.vertexShader = STAR_V_INJECT + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <beginnormal_vertex>',
+        `#include <beginnormal_vertex>
+         vNormalPass = normalize(normalMatrix * normal);
+        `
+      );
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+         vWaveParamsPass = aWaveParams;
+         vExtraParamsPass = aExtraParams;
+         vInstanceColorPass = instanceColor;
+
+         float disp = 0.0;
+         if (aMorphParams.x > 0.0) {
+            float t_local = mod(uTime, 1000.0) * aWaveParams.y;
+            disp = noise(position * aMorphParams.y + t_local) * aMorphParams.x;
+            if (aMorphParams.z > 0.0) {
+              disp += noise(position * aMorphParams.y * 4.0 - t_local * 1.5) * aMorphParams.x * 0.3 * aMorphParams.z;
+            }
+         }
+         vDisplacementPass = disp;
+         transformed += normal * disp;
+        `
+      );
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <project_vertex>',
+        `#include <project_vertex>
+         vViewPositionPass = -mvPosition.xyz;
+        `
+      );
+
+      shader.fragmentShader = STAR_F_INJECT + shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <dithering_fragment>',
+        `#include <dithering_fragment>
+         vec3 normal_f = normalize(vNormalPass);
+         vec3 viewDir_f = normalize(vViewPositionPass);
+         float viewAngle_f = dot(normal_f, viewDir_f);
+
+         float fresnel_f = pow(1.0 - clamp(viewAngle_f, 0.0, 1.0), vWaveParamsPass.x);
+         float wave_f = sin(uTime * vWaveParamsPass.y + vNormalPass.y * vExtraParamsPass.y + vDisplacementPass * 5.0) * 0.5 + 0.5;
+         
+         float sNoise_f = 0.0;
+         if (vExtraParamsPass.x > 0.0) {
+           sNoise_f = f_noise(vNormalPass * 5.0 + uTime * 0.5) * vExtraParamsPass.x;
+         }
+
+         vec3 color_f = vInstanceColorPass;
+         color_f += vDisplacementPass * 0.5 * vInstanceColorPass;
+         
+         vec3 finalColor_f = mix(color_f, color_f * 1.5, clamp(fresnel_f * wave_f + sNoise_f, 0.0, 1.0));
+         finalColor_f += (vInstanceColorPass * vDisplacementPass * 2.0 * vExtraParamsPass.z);
+
+         float coreAlpha_f = 1.0;
+         if (vWaveParamsPass.z > 0.5) {
+           coreAlpha_f = smoothstep(0.0, 0.25, viewAngle_f);
+         }
+
+         float alpha_f = clamp(fresnel_f + 0.45, 0.0, 1.0) * coreAlpha_f;
+         gl_FragColor = vec4(finalColor_f + (fresnel_f * 0.8 * coreAlpha_f), alpha_f);
+         if (alpha_f > 0.8) gl_FragColor.rgb *= 1.5;
+        `
+      );
+    };
+    return mat;
+  };
+
+  instancedSmall = new THREE.InstancedMesh(new THREE.SphereGeometry(0.07, 4, 4), createMaterial(), Math.max(1, cntS));
+  instancedMed   = new THREE.InstancedMesh(new THREE.SphereGeometry(0.13, 8, 8), createMaterial(), Math.max(1, cntM));
+  instancedLarge = new THREE.InstancedMesh(new THREE.SphereGeometry(0.22, 12, 12), createMaterial(), Math.max(1, cntL));
+
+  // Accretion Disk Instanced Mesh
+  const cntBH = stars.filter(s => s.cite > 15000).length;
+  if (cntBH > 0) {
+    const diskMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    diskMat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = { value: 0 };
+      shader.uniforms.uRS = { value: 0.15 };
+      shader.uniforms.uLensing = { value: 1.2 };
+      diskMat.userData.shader = shader;
+
+      shader.vertexShader = DISK_V_INJECT + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+         vUvPass = uv;
+         vInstanceColorPass = instanceColor;
+         vec4 wPos = instanceMatrix * vec4(position, 1.0);
+         vec3 vDir = normalize(cameraPosition - wPos.xyz);
+         float rl = length(position.xy);
+         float al = dot(normalize(wPos.xyz), vDir);
+         if (al < 0.0) {
+           float doff = exp(-(rl - uRS) * 0.7);
+           transformed.z += al * doff * uLensing;
+         }
+        `
+      );
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <project_vertex>',
+        `#include <project_vertex>
+         vViewPosPass = -mvPosition.xyz;
+        `
+      );
+
+      shader.fragmentShader = DISK_F_INJECT + shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <dithering_fragment>',
+        `#include <dithering_fragment>
+         vec2 dp = vUvPass * 2.0 - 1.0;
+         float dr = length(dp) * 10.0;
+         float da = atan(dp.y, dp.x);
+         float dn = d_noise(vec2(dr * 2.0, da * 1.5 - uTime * 2.0));
+         float dlanes = smoothstep(0.0, 1.0, sin(dr * 5.0 + dn * 4.0)) * 0.5 + 0.5;
+         vec3 dcol = vInstanceColorPass * (0.4 + dlanes);
+         float dalpha = smoothstep(uRS, uRS + 0.5, dr) * (1.0 - smoothstep(8.0, 10.0, dr));
+         gl_FragColor = vec4(dcol, dalpha * 0.7);
+        `
+      );
+    };
+    instancedDisk = new THREE.InstancedMesh(new THREE.RingGeometry(0.2, 2.5, 64, 8), diskMat, cntBH);
+    instancedDisk.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cntBH * 3), 3);
+    scene.add(instancedDisk);
+  }
 
   [instancedSmall, instancedMed, instancedLarge].forEach(im => {
     im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    // Hide all slots by default - _buildStars will set real ones
+    im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(im.count * 3), 3);
+
+    // Custom attributes for the orb shader
+    const morph = new Float32Array(im.count * 3);
+    const wave  = new Float32Array(im.count * 3);
+    const extra = new Float32Array(im.count * 3);
+    im.geometry.setAttribute('aMorphParams', new THREE.InstancedBufferAttribute(morph, 3));
+    im.geometry.setAttribute('aWaveParams',  new THREE.InstancedBufferAttribute(wave, 3));
+    im.geometry.setAttribute('aExtraParams', new THREE.InstancedBufferAttribute(extra, 3));
+
     for (let i = 0; i < im.count; i++) {
       dummy.position.set(0, 0, 0);
-      dummy.quaternion.identity();
       dummy.scale.setScalar(0);
       dummy.updateMatrix();
       im.setMatrixAt(i, dummy.matrix);
@@ -510,6 +803,12 @@ function _buildStars(stars) {
     else if (cite > 200)  { tierMesh = instancedMed;   localId = iM++; }
     else                  { tierMesh = instancedSmall;  localId = iS++; }
 
+    if (cite > 15000 && instancedDisk) {
+      const diskIdx = instanceMapDisk.length;
+      instancedDisk.setColorAt(diskIdx, _col);
+      instanceMapDisk.push({ star, localId: diskIdx, globalIdx: gi });
+    }
+
     tierMesh.setMatrixAt(localId, dummy.matrix);
     tierMesh.setColorAt(localId, _col);
     starDataArray.push({ star, tierMesh, localId, globalIdx: gi });
@@ -519,7 +818,7 @@ function _buildStars(stars) {
     glowByCluster[star.cluster].push(star.x, star.y, star.z);
   });
 
-  _flushAll();
+  _applyVisualStateAll();
   instanceMapSmall = starDataArray.filter(e => e.tierMesh === instancedSmall);
   instanceMapMed   = starDataArray.filter(e => e.tierMesh === instancedMed);
   instanceMapLarge = starDataArray.filter(e => e.tierMesh === instancedLarge);
@@ -672,6 +971,7 @@ function _bindControls(canvas) {
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
+    resizePostProcessing(innerWidth, innerHeight);
   });
 
   // Touch support
@@ -731,7 +1031,7 @@ function _animate() {
   _frameHooks.forEach(fn => fn(delta));
   // ── END COMET ADDITION 3 ──────────────────────────────────────────────────
 
-  if (autoRotate && !isDragging) tgtTheta += 0.0006;
+  if (autoRotate && !isDragging && !reducedMotion) tgtTheta += 0.0006;
 
   pivot.lerp(pivotTarget, 0.06);
 
@@ -750,10 +1050,26 @@ function _animate() {
   );
   camera.lookAt(pivot);
 
-  _animateFloats();
+  // ── Reduced Motion / Quality adjustments ──
+  const floatSpeed = reducedMotion ? 0 : 1;
+  const timeFactor = (qualityTier === 'low') ? 0 : 1; // Freeze shaders on low quality
+  
+  _animateFloats(floatSpeed);
   if (performance.now() - lastRaycast > 120) { lastRaycast = performance.now(); _updateHover(); }
 
-  renderer.render(scene, camera);
+  // Update shader time uniforms
+  const shaderTime = t * timeFactor;
+  [instancedSmall, instancedMed, instancedLarge].forEach(im => {
+    if (im && im.material.userData && im.material.userData.shader) {
+      im.material.userData.shader.uniforms.uTime.value = shaderTime;
+    }
+  });
+  if (instancedDisk && instancedDisk.material.userData && instancedDisk.material.userData.shader) {
+    instancedDisk.material.userData.shader.uniforms.uTime.value = shaderTime;
+  }
+
+  // Pass current camera distance for adaptive effects
+  updateAndRender(delta, renderer, scene, camera, camR);
 }
 
 // Float animation runs every N frames, not every frame.
@@ -763,10 +1079,9 @@ function _animate() {
 let _floatFrame = 0;
 const FLOAT_EVERY = 4; // animate floats every 4 frames
 
-function _animateFloats() {
+function _animateFloats(speed = 1) {
   _floatFrame++;
-  // Only run the expensive loop every FLOAT_EVERY frames
-  if (_floatFrame % FLOAT_EVERY !== 0) return;
+  if (_floatFrame % FLOAT_EVERY !== 0 || speed === 0) return;
 
   // Only animate stars within ~60 units of the camera pivot (visible cluster)
   // Stars far away are invisible at normal zoom so no need to update them
@@ -807,21 +1122,36 @@ function _castAgainstInstances() {
   raycaster.setFromCamera(mouse2D, camera);
   let best = null, bestDist = Infinity;
 
-  for (const [im, map] of [
-    [instancedSmall, instanceMapSmall],
-    [instancedMed,   instanceMapMed],
-    [instancedLarge, instanceMapLarge],
-  ]) {
-    if (!im || !map.length) continue;
-    const hits = raycaster.intersectObject(im);
-    if (!hits.length || hits[0].distance >= bestDist) continue;
-    bestDist = hits[0].distance;
-    const entry = map.find(e => e.localId === hits[0].instanceId);
-    if (!entry) continue;
-    im.getMatrixAt(hits[0].instanceId, dummy.matrix);
+  const b = basePosArray;
+  starDataArray.forEach(entry => {
+    const { tierMesh, localId, globalIdx } = entry;
+    if (!tierMesh) return;
+
+    // Get current instance position from matrix
+    tierMesh.getMatrixAt(localId, dummy.matrix);
     const worldPos = new THREE.Vector3().setFromMatrixPosition(dummy.matrix);
-    best = { star: entry.star, worldPos };
-  }
+
+    // Improved Raycasting: Calculate dynamic bounding sphere based on displacement
+    let radius = 0.15; // default for small
+    if (tierMesh === instancedMed)   radius = 0.25;
+    if (tierMesh === instancedLarge) radius = 0.45;
+
+    // Add max possible displacement from attribute
+    const morph = tierMesh.geometry.attributes.aMorphParams;
+    if (morph) {
+      const maxDisp = morph.getX(localId);
+      radius += maxDisp * 1.5; // expansion factor
+    }
+
+    const distToRay = raycaster.ray.distanceToPoint(worldPos);
+    if (distToRay < radius) {
+      const distToCam = camera.position.distanceTo(worldPos);
+      if (distToCam < bestDist) {
+        bestDist = distToCam;
+        best = { star: entry.star, worldPos };
+      }
+    }
+  });
   return best;
 }
 
@@ -862,7 +1192,7 @@ function _updateHover() {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function _flushAll(matrixOnly = false) {
-  for (const im of [instancedSmall, instancedMed, instancedLarge]) {
+  for (const im of [instancedSmall, instancedMed, instancedLarge, instancedDisk]) {
     if (!im) continue;
     im.instanceMatrix.needsUpdate = true;
     if (!matrixOnly && im.instanceColor) im.instanceColor.needsUpdate = true;

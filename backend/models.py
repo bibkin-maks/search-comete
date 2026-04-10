@@ -10,7 +10,12 @@ Fixes applied:
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
+
+
+class LoreResponse(BaseModel):
+    cluster:     str
+    description: str
 
 
 class Paper(BaseModel):
@@ -65,6 +70,7 @@ class SearchResponse(BaseModel):
     total:   int
     results: list[SearchResult]
     query:   str
+    mode:    str = "text"
 
 
 class StarPoint(BaseModel):

@@ -11,6 +11,7 @@
  *  - Time Travel year slider, Meteor of the Day, pinned stars, comets
  */
 
+import './styles.css';
 import {
   initGalaxy,
   highlightStars,
@@ -19,12 +20,11 @@ import {
   flyToCluster,
   getRemappedPos,
   hasStar,
-  CLUSTER_COLORS,
-  setActiveYear,
   setPivotTarget,
   setVisitors,
   clearVisitors,
   setTheme,
+  setViewShift,
   getScene,
   getCamera,
   getRaycaster,
@@ -32,79 +32,95 @@ import {
   getRenderer,
 } from './galaxy.js';
 import { doSearch, setSearchCorpus, localMatches } from './search.js';
-import { showDetail, closeDetail, setCorpus } from './panel.js';
-import { searchLive, scholarUrl } from './live.js';
+import { showDetail, closeDetail, setCorpus, initPanel } from './panel.js';
+import { searchLive, scholarUrl, getWork } from './live.js';
 import { USE_BACKEND, API_BASE } from './config.js';
 import { FALLBACK_PAPERS } from './data.js';
 import { initComets, tickComets, raycastComets, updateCorpus as updateCometCorpus, cleanTitle, stopCometTracking } from './comet.js';
 import { initSound, playWarp, playStarClick, playCometAppear, playCometClick } from './sound.js';
 import { initWormhole } from './wormhole.js';
+import { initLabels, updateLabels, updateSector, initTimeline } from './hud.js';
+import { initWorkspace, focusField, fieldLabel, closeCompare } from './workspace.js';
+import { icon, brandMark } from './icons.js';
+import { setMeaningCorpus, loadMeaning, meaningReady, semanticSearch, belonging } from './meaning.js';
+import { initUniverse, getMode, setMode, addToUniverse, onUniverseChange, universeSize, clearUniverse } from './universe.js';
 
 // ── Inject UI HTML ────────────────────────────────────────────────────────────
 document.getElementById('app').innerHTML = `
 <canvas id="canvas"></canvas>
+<div id="labels"></div>
 
-<div id="hud-top">
-  <div>
-    <div class="wordmark">search<em>·comète</em></div>
-    <div class="tagline" id="tagline">Every paper is a star · closeness = similar meaning</div>
-  </div>
-  <div class="elastic-pill" id="live-pill" title="Live search across all of OpenAlex"><div class="es-dot"></div><span id="live-pill-text">OPENALEX · LIVE</span></div>
-</div>
-
-<div id="search-area">
-  <div id="search-wrap">
-    <input id="search-input" type="text" placeholder="Search the universe of ideas…  ( / )" autocomplete="off" />
-    <button id="live-toggle" class="on" title="Also search all 250M+ papers on OpenAlex">LIVE</button>
-    <button id="search-btn" aria-label="Search">→</button>
-  </div>
-  <div id="live-results" hidden>
-    <div id="live-head">
-      <span id="live-summary"></span>
-      <button id="live-collapse" aria-label="Hide live results">–</button>
+<header id="topbar">
+  <div class="brand">
+    ${brandMark}
+    <div>
+      <div class="wordmark">search<em>·comète</em></div>
+      <div id="sector"><span class="dot"></span><span>Charting…</span></div>
     </div>
-    <div id="live-list"></div>
   </div>
-  <div id="query-chips">
-    <button class="chip" data-q="attention mechanisms transformers">attention mechanisms</button>
-    <button class="chip" data-q="CRISPR gene editing">CRISPR gene editing</button>
-    <button class="chip" data-q="black holes gravitational waves">black holes</button>
-    <button class="chip" data-q="reinforcement learning reward">reinforcement learning</button>
-    <button class="chip" data-q="protein folding structure">protein folding</button>
-    <button class="chip" data-q="quantum computing algorithms">quantum computing</button>
+  <div id="search-area">
+    <div id="search-wrap" class="glass">
+      ${icon.search}
+      <input id="search-input" type="text" placeholder="Search the galaxy, or all of science…" autocomplete="off" aria-label="Search papers" />
+      <span class="kbd" aria-hidden="true">/</span>
+      <button id="live-toggle" class="on" title="Also search all 250M+ papers on OpenAlex">LIVE</button>
+      <button id="search-btn" aria-label="Search">${icon.arrow}</button>
+    </div>
+    <div id="live-results" class="glass" hidden>
+      <div id="live-head">
+        <span id="live-summary"></span>
+        <button id="live-collapse" class="icon-btn" aria-label="Hide live results">–</button>
+      </div>
+      <div id="live-list"></div>
+    </div>
+    <div id="query-chips">
+      <button class="chip" data-q="attention mechanisms transformers">attention mechanisms</button>
+      <button class="chip" data-q="CRISPR gene editing">CRISPR</button>
+      <button class="chip" data-q="black holes gravitational waves">black holes</button>
+      <button class="chip" data-q="reinforcement learning reward">reinforcement learning</button>
+      <button class="chip" data-q="protein folding structure">protein folding</button>
+      <button class="chip" data-q="quantum computing algorithms">quantum computing</button>
+    </div>
   </div>
-</div>
-
-<div id="results-label"></div>
-
-<div id="time-travel">
-  <div class="tt-heading">TIME TRAVEL</div>
-  <input id="year-slider" type="range" />
-  <div id="year-readout">ALL YEARS</div>
-</div>
-
-<div id="meteor-fact"></div>
-
-<div id="legend">
-  <div class="legend-row active" data-cluster="all">
-    <div class="legend-dot" style="background:rgba(245,242,235,0.4)"></div>ALL FIELDS
+  <div class="top-actions">
+    <div class="seg glass" id="mode-switch" role="group" aria-label="View">
+      <button data-mode="galaxy" class="on" title="All 54k mapped papers">Galaxy</button>
+      <button data-mode="universe" title="Start empty and grow your own map by searching">My universe <span id="universe-count"></span></button>
+    </div>
+    <div id="live-pill" class="glass" title="Live search across all of OpenAlex"><span class="es-dot"></span><span id="live-pill-text">OPENALEX</span></div>
+    <span id="wormhole-slot"></span>
+    <button id="settings-trigger" class="icon-btn" aria-label="Settings">${icon.settings}</button>
   </div>
-</div>
+</header>
 
-<div id="star-count"></div>
-<div id="instructions">drag to orbit · scroll to zoom · click a star</div>
+<aside id="dock" class="glass" aria-label="Workspace">
+  <nav class="tabs">
+    <button class="tab active" data-tab="fields">${icon.layers} Fields</button>
+    <button class="tab" data-tab="pinned">${icon.pin} Pinned <span class="count" id="pin-count"></span></button>
+    <button class="tab" data-tab="web">${icon.web} Web <span class="count" id="web-count"></span></button>
+  </nav>
+  <div class="tab-body active" id="tab-fields"><div id="legend"></div><div id="meteor-fact"></div></div>
+  <div class="tab-body" id="tab-pinned"></div>
+  <div class="tab-body" id="tab-web"></div>
+</aside>
+<button id="dock-toggle" class="btn glass">${icon.layers} Workspace</button>
 
-<div id="detail-panel">
-  <button id="detail-close">✕</button>
+<section id="detail-panel" class="glass" aria-label="Paper details">
+  <button id="detail-close" class="icon-btn" aria-label="Close">${icon.close}</button>
   <div id="detail-category"></div>
-  <div id="detail-lore"></div>
   <div id="detail-title"></div>
   <div id="detail-authors"></div>
   <div id="detail-year"></div>
   <div id="detail-venue"></div>
   <div id="detail-links"></div>
   <div id="detail-actions">
-    <button id="pin-btn" class="detail-action-btn">☆ PIN AS STAR</button>
+    <button id="pin-btn" class="btn">${icon.pin} Pin</button>
+    <button id="rope-btn" class="btn">${icon.link} Rope to…</button>
+  </div>
+  <div id="rope-menu" class="rope-menu" hidden></div>
+  <div id="detail-belongs-wrap">
+    <div class="detail-field-label">Where it belongs</div>
+    <div id="detail-belongs"></div>
   </div>
   <div class="detail-field-label">Abstract</div>
   <div id="detail-abstract"></div>
@@ -115,299 +131,85 @@ document.getElementById('app').innerHTML = `
       <div class="score-val" id="score-val"></div>
     </div>
   </div>
+  <div class="detail-field-label">Topics</div>
+  <div id="detail-topics"></div>
+  <div id="detail-ai">
+    <button id="ai-topics-btn" class="btn ice">${icon.sparkle} Related topics by meaning</button>
+    <div class="progress" id="ai-progress" hidden><span></span></div>
+    <div class="ai-note" id="ai-note"></div>
+  </div>
+  <div class="detail-field-label">Citation tree</div>
+  <div class="web-controls">
+    <div class="seg" id="web-depth" title="How many levels deep"><button data-d="1">1</button><button data-d="2" class="on">2</button><button data-d="3">3</button></div>
+    <button class="btn ice" id="trace-refs" title="Grow its references downward (the past)">↓ References</button>
+    <button class="btn" id="trace-cited" title="Grow papers citing it upward (the future)">↑ Cited by</button>
+  </div>
   <div class="detail-field-label">Nearby in the galaxy</div>
   <div id="detail-similar"></div>
+  <div class="detail-field-label">Field</div>
+  <div id="detail-lore"></div>
   <div id="detail-es-wrap">
     <div class="detail-field-label">Elasticsearch kNN query</div>
     <div class="elastic-query-box" id="elastic-query"></div>
   </div>
-</div>
+</section>
 
-<div id="tooltip">
-  <div id="tt-title"></div>
-  <div id="tt-meta"></div>
-</div>
+<section id="compare" class="glass" aria-label="Rope analysis"></section>
 
+<footer id="timeline" class="glass">
+  <button id="play-btn" aria-label="Play through history"></button>
+  <div class="tl-track" id="tl-track">
+    <canvas id="tl-hist"></canvas>
+    <div id="tl-cursor"></div>
+    <div class="tl-axis"><span id="tl-min"></span><span id="tl-mid"></span><span id="tl-max"></span></div>
+  </div>
+  <div class="tl-readout"><div id="year-readout">All years</div><div id="year-count"></div></div>
+  <input id="year-slider" type="range" tabindex="-1" aria-hidden="true" />
+</footer>
+
+<div id="universe-hint" class="glass" hidden>
+  <div class="eyebrow" style="color:var(--gold)">My universe</div>
+  <div class="uh-title">Your universe is empty.</div>
+  <div class="uh-body">Search for anything to light up your first stars. Every paper you find, pin or grow a tree from stays here, placed by meaning; the faint dust is the full 54k-paper galaxy, used as the map underneath.</div>
+  <div class="uh-actions"><button class="btn gold" data-q="protein folding">Try “protein folding”</button><button class="btn" data-q="black holes">Try “black holes”</button></div>
+</div>
+<div id="results-label"></div>
+<div id="tooltip"><div id="tt-title"></div><div id="tt-meta"></div></div>
+<div id="toast" class="glass" role="status"></div>
 <div id="warp-overlay"></div>
 
 <div id="galaxy-loader">
   <div class="loader-inner">
+    ${brandMark}
     <div class="loader-title">search<em>·comète</em></div>
     <div class="loader-bar-wrap"><div class="loader-bar" id="loader-bar-fill"></div></div>
     <div class="loader-label" id="loader-status">Mapping the universe…</div>
   </div>
 </div>
 
-<div id="settings-trigger">⚙</div>
-<div id="settings-panel">
-  <div class="settings-header">SYSTEM CONTROLS</div>
+<div id="settings-panel" class="glass">
+  <div class="eyebrow" style="color:var(--gold)">System controls</div>
   <div class="settings-group">
-    <div class="settings-label">Visual Quality</div>
+    <div class="eyebrow">Visual quality</div>
     <select id="quality-select">
-      <option value="high">High (Full Shaders)</option>
-      <option value="medium">Medium (No Morph)</option>
-      <option value="low">Low (Mobile/Static)</option>
+      <option value="high">High · full shaders</option>
+      <option value="medium">Medium</option>
+      <option value="low">Low · laptops on battery</option>
     </select>
   </div>
   <div class="settings-group">
-    <div class="settings-label">Accessibility</div>
-    <label class="switch-wrap">
-      <input type="checkbox" id="reduced-motion-toggle">
-      <span class="switch-label">Reduced Motion</span>
-    </label>
-    <label class="switch-wrap">
-      <input type="checkbox" id="high-contrast-toggle">
-      <span class="switch-label">High Contrast</span>
-    </label>
+    <div class="eyebrow">Accessibility</div>
+    <label class="switch-wrap"><input type="checkbox" id="reduced-motion-toggle"> Reduced motion</label>
+    <label class="switch-wrap"><input type="checkbox" id="high-contrast-toggle"> High contrast</label>
   </div>
   <div class="settings-group">
-    <div id="fps-counter">FPS: --</div>
+    <div class="eyebrow">My universe</div>
+    <button class="btn" id="universe-clear">Clear my universe</button>
   </div>
+  <div class="settings-group"><div id="fps-counter">FPS: --</div></div>
+  <div class="ai-note">Drag to orbit · scroll to zoom · click a star · <span class="kbd">/</span> search · <span class="kbd">Esc</span> close</div>
 </div>
 `;
-
-// ── Inject global styles ──────────────────────────────────────────────────────
-const style = document.createElement('style');
-style.textContent = `
-* { margin: 0; padding: 0; box-sizing: border-box; }
-:root {
-  --ink: #0a0a12; --paper: #f5f2eb; --dim: rgba(245,242,235,0.45);
-  --dimmer: rgba(245,242,235,0.15); --gold: #c9a84c;
-  --glow-ml: #7c6dfa; --glow-bio: #3dd9a4; --glow-phys: #fa8c4f;
-  --glow-cs: #5ab4f5; --glow-math: #f06ba8;
-  --mono: 'IBM Plex Mono', monospace;
-  --display: 'Syne', sans-serif;
-  --serif: 'Newsreader', serif;
-}
-html, body { width: 100%; height: 100%; background: var(--ink); color: var(--paper); overflow: hidden; cursor: crosshair; }
-#canvas { position: fixed; inset: 0; z-index: 0; }
-
-/* HUD */
-#hud-top { position:fixed; top:0; left:0; right:0; z-index:10; padding:18px 28px; display:flex; align-items:center; gap:20px; background:linear-gradient(180deg,rgba(10,10,18,0.95) 0%,transparent 100%); pointer-events:none; }
-.wordmark { font-family:var(--display); font-size:18px; font-weight:800; letter-spacing:-0.02em; color:var(--paper); }
-.wordmark em { font-style:normal; color:var(--gold); }
-.tagline { font-family:var(--mono); font-size:9px; letter-spacing:0.18em; color:var(--dimmer); text-transform:uppercase; margin-top:2px; }
-.elastic-pill { margin-left:auto; margin-right:40px; display:flex; align-items:center; gap:6px; font-family:var(--mono); font-size:9px; letter-spacing:0.1em; color:rgba(245,242,235,0.35); border:0.5px solid rgba(245,242,235,0.1); border-radius:2px; padding:5px 10px; }
-.es-dot { width:5px; height:5px; border-radius:50%; background:var(--glow-bio); animation:breathe 3s ease-in-out infinite; }
-@keyframes breathe { 0%,100%{opacity:1} 50%{opacity:0.3} }
-
-/* Search */
-#search-area { position:fixed; top:68px; left:50%; transform:translateX(-50%); z-index:10; width:520px; max-width: calc(100vw - 48px); }
-#search-wrap { position:relative; display:flex; align-items:center; }
-#search-input { width:100%; background:rgba(245,242,235,0.04); border:0.5px solid rgba(245,242,235,0.18); border-radius:2px; padding:12px 52px 12px 18px; font-family:var(--mono); font-size:13px; color:var(--paper); outline:none; letter-spacing:0.03em; transition:border-color 0.2s,background 0.2s; }
-#search-input::placeholder { color:rgba(245,242,235,0.22); }
-#search-input:focus { border-color:rgba(201,168,76,0.5); background:rgba(201,168,76,0.03); }
-#search-btn { position:absolute; right:0; height:100%; width:48px; background:none; border:none; border-left:0.5px solid rgba(245,242,235,0.1); color:var(--gold); font-size:16px; cursor:pointer; transition:background 0.15s; display:flex; align-items:center; justify-content:center; }
-#search-btn:hover { background:rgba(201,168,76,0.08); }
-#query-chips { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; padding:0 2px; }
-.chip { font-family:var(--mono); font-size:9px; letter-spacing:0.08em; padding:4px 10px; border:0.5px solid rgba(245,242,235,0.1); border-radius:1px; cursor:pointer; transition:all 0.15s; color:rgba(245,242,235,0.4); background:transparent; }
-.chip:hover { border-color:var(--gold); color:var(--gold); }
-
-/* Legend */
-#legend { position:fixed; left:24px; bottom:80px; z-index:10; display:flex; flex-direction:column; gap:8px; }
-.legend-row { display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:9px; letter-spacing:0.1em; color:rgba(245,242,235,0.35); cursor:pointer; transition:color 0.15s; }
-.legend-row:hover, .legend-row.active { color:var(--paper); }
-.legend-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
-
-/* Misc HUD */
-#star-count { position:fixed; left:24px; bottom:24px; font-family:var(--mono); font-size:9px; letter-spacing:0.12em; color:rgba(245,242,235,0.2); z-index:10; }
-#instructions { position:fixed; bottom:24px; right:24px; font-family:var(--mono); font-size:9px; letter-spacing:0.1em; color:rgba(245,242,235,0.18); text-align:right; line-height:1.8; z-index:10; }
-#results-label { position:fixed; top:140px; left:50%; transform:translateX(-50%); font-family:var(--mono); font-size:10px; letter-spacing:0.12em; color:var(--gold); z-index:10; opacity:0; transition:opacity 0.4s; pointer-events:none; white-space:nowrap; }
-#results-label.show { opacity:1; }
-#warp-overlay { position:fixed; inset:0; z-index:15; pointer-events:none; opacity:0; background:radial-gradient(ellipse at center,rgba(201,168,76,0.04) 0%,transparent 70%); transition:opacity 0.3s; }
-#warp-overlay.active { opacity:1; }
-
-/* Time Travel */
-#time-travel {
-  position: fixed;
-  right: 24px;
-  top: 170px;
-  z-index: 10;
-  width: 220px;
-  background: rgba(10,10,18,0.78);
-  border: 0.5px solid rgba(245,242,235,0.1);
-  padding: 12px 14px;
-  border-radius: 2px;
-  backdrop-filter: blur(8px);
-}
-.tt-heading {
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.14em;
-  color: var(--gold);
-  margin-bottom: 10px;
-}
-#year-slider {
-  width: 100%;
-  accent-color: var(--gold);
-  cursor: pointer;
-}
-#year-readout {
-  margin-top: 8px;
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.1em;
-  color: rgba(245,242,235,0.45);
-}
-
-/* Meteor of the Day */
-#meteor-fact {
-  position: fixed;
-  right: 24px;
-  bottom: 80px;
-  width: 280px;
-  z-index: 10;
-  background: rgba(10,10,18,0.78);
-  border: 0.5px solid rgba(245,242,235,0.1);
-  padding: 14px 16px;
-  border-radius: 2px;
-  backdrop-filter: blur(8px);
-  font-family: var(--mono);
-}
-#meteor-fact .meteor-label {
-  font-size: 9px;
-  letter-spacing: 0.14em;
-  color: var(--gold);
-  margin-bottom: 8px;
-}
-#meteor-fact .meteor-title {
-  font-family: var(--serif);
-  font-size: 14px;
-  line-height: 1.5;
-  color: var(--paper);
-  margin-bottom: 6px;
-}
-#meteor-fact .meteor-meta {
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  color: rgba(245,242,235,0.38);
-  line-height: 1.6;
-}
-
-/* Detail panel */
-#detail-panel { position:fixed; right:0; top:0; bottom:0; width:360px; background:rgba(10,10,18,0.97); border-left:0.5px solid rgba(245,242,235,0.08); z-index:20; transform:translateX(100%); transition:transform 0.4s cubic-bezier(0.16,1,0.3,1); overflow-y:auto; padding:28px 28px 40px; display:flex; flex-direction:column; gap:0; cursor:default; }
-#detail-panel.open { transform:translateX(0); }
-#detail-close { position:absolute; top:18px; right:20px; background:none; border:none; color:rgba(245,242,235,0.3); font-size:18px; cursor:pointer; font-family:var(--mono); line-height:1; transition:color 0.15s; }
-#detail-close:hover { color:var(--paper); }
-.detail-field-label { font-family:var(--mono); font-size:9px; letter-spacing:0.15em; text-transform:uppercase; color:rgba(245,242,235,0.3); margin-bottom:4px; margin-top:20px; }
-#detail-category { font-family:var(--mono); font-size:9px; letter-spacing:0.12em; padding:3px 8px; border-radius:1px; display:inline-block; margin-bottom:14px; }
-#detail-title { font-family:var(--serif); font-size:20px; font-weight:300; line-height:1.45; color:var(--paper); margin-bottom:8px; }
-#detail-authors { font-family:var(--mono); font-size:10px; color:rgba(245,242,235,0.4); letter-spacing:0.04em; line-height:1.6; margin-bottom:6px; }
-#detail-year { font-family:var(--mono); font-size:10px; color:var(--gold); letter-spacing:0.08em; }
-#detail-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 14px;
-}
-.detail-action-btn {
-  background: rgba(245,242,235,0.04);
-  border: 0.5px solid rgba(245,242,235,0.12);
-  color: var(--gold);
-  padding: 8px 10px;
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.12em;
-  cursor: pointer;
-  border-radius: 2px;
-  transition: background 0.15s, border-color 0.15s;
-}
-.detail-action-btn:hover {
-  background: rgba(201,168,76,0.08);
-  border-color: rgba(201,168,76,0.35);
-}
-#detail-lore { font-family:var(--mono); font-size:9px; font-style:italic; border-bottom:0.5px solid rgba(245,242,235,0.05); padding-bottom:12px; margin-bottom:14px; color:rgba(245,242,235,0.4); line-height:1.6; }
-#detail-abstract { font-family:var(--serif); font-size:13px; font-style:italic; line-height:1.75; color:rgba(245,242,235,0.65); border-left:1.5px solid rgba(201,168,76,0.25); padding-left:14px; margin-top:4px; }
-#detail-score { display:flex; align-items:center; gap:10px; margin-top:4px; }
-.score-bar-wrap { flex:1; height:3px; background:rgba(245,242,235,0.08); border-radius:2px; overflow:hidden; }
-.score-bar { height:100%; border-radius:2px; background:var(--gold); transition:width 0.6s ease; }
-.score-val { font-family:var(--mono); font-size:11px; color:var(--gold); min-width:36px; text-align:right; }
-#detail-similar { display:flex; flex-direction:column; gap:6px; margin-top:4px; }
-.similar-item { padding:8px 10px; border:0.5px solid rgba(245,242,235,0.07); border-radius:2px; cursor:pointer; transition:background 0.15s,border-color 0.15s; }
-.similar-item:hover { background:rgba(245,242,235,0.04); border-color:rgba(245,242,235,0.15); }
-.similar-title { font-family:var(--serif); font-size:12px; color:var(--paper); line-height:1.4; margin-bottom:3px; }
-.similar-meta { font-family:var(--mono); font-size:9px; color:rgba(245,242,235,0.3); letter-spacing:0.06em; }
-.elastic-query-box { margin-top:4px; background:rgba(245,242,235,0.03); border:0.5px solid rgba(245,242,235,0.07); border-radius:2px; padding:10px 12px; font-family:var(--mono); font-size:9px; color:rgba(245,242,235,0.35); line-height:1.7; white-space:pre; overflow-x:auto; letter-spacing:0.03em; }
-
-/* Tooltip */
-#tooltip { position:fixed; pointer-events:none; z-index:30; display:none; background:rgba(10,10,18,0.92); border:0.5px solid rgba(245,242,235,0.12); border-radius:2px; padding:8px 12px; max-width:240px; }
-#tt-title { font-family:var(--serif); font-size:12px; color:var(--paper); line-height:1.4; margin-bottom:3px; }
-#tt-meta { font-family:var(--mono); font-size:9px; color:rgba(245,242,235,0.35); letter-spacing:0.06em; }
-
-/* Loader */
-#galaxy-loader { position:fixed; inset:0; z-index:100; background:var(--ink); display:flex; align-items:center; justify-content:center; }
-.loader-inner { display:flex; flex-direction:column; align-items:center; gap:20px; }
-.loader-title { font-family:var(--display); font-size:28px; font-weight:800; letter-spacing:-0.02em; color:var(--paper); }
-.loader-title em { font-style:normal; color:var(--gold); }
-.loader-bar-wrap { width:240px; height:2px; background:rgba(245,242,235,0.08); border-radius:2px; overflow:hidden; }
-.loader-bar { height:100%; width:0%; background:var(--gold); border-radius:2px; transition: width 0.3s ease; }
-.loader-label { font-family:var(--mono); font-size:10px; letter-spacing:0.15em; color:rgba(245,242,235,0.3); text-transform:uppercase; }
-
-/* Settings */
-#settings-trigger { position:fixed; top:24px; right:24px; z-index:35; font-size:20px; cursor:pointer; opacity:0.5; transition:opacity 0.2s, transform 0.3s; pointer-events: auto; }
-#settings-trigger:hover { opacity:1; transform:rotate(90deg); }
-#settings-panel { position:fixed; top:64px; right:24px; width:220px; background:rgba(10,10,18,0.95); border:0.5px solid rgba(245,242,235,0.15); border-radius:4px; padding:16px; z-index:35; display:none; flex-direction:column; gap:16px; backdrop-filter:blur(10px); pointer-events: auto; }
-#settings-panel.open { display:flex; }
-.settings-header { font-family:var(--mono); font-size:9px; letter-spacing:0.15em; color:var(--gold); border-bottom:0.5px solid rgba(245,242,235,0.1); padding-bottom:8px; }
-.settings-group { display:flex; flex-direction:column; gap:8px; }
-.settings-label { font-family:var(--mono); font-size:8px; color:rgba(245,242,235,0.4); text-transform:uppercase; }
-#quality-select { background:rgba(245,242,235,0.05); border:0.5px solid rgba(245,242,235,0.2); color:var(--paper); font-family:var(--mono); font-size:10px; padding:6px; outline:none; }
-.switch-wrap { display:flex; align-items:center; gap:8px; cursor:pointer; }
-.switch-label { font-family:var(--mono); font-size:10px; color:var(--paper); }
-#fps-counter { font-family:var(--mono); font-size:9px; color:rgba(245,242,235,0.3); }
-
-/* Live search */
-#search-input { padding-right:112px; }
-#live-toggle { position:absolute; right:56px; top:50%; transform:translateY(-50%); font-family:var(--mono); font-size:9px; letter-spacing:0.14em; padding:4px 8px; border-radius:2px; cursor:pointer; background:transparent; border:0.5px solid rgba(245,242,235,0.18); color:rgba(245,242,235,0.35); transition:all 0.15s; }
-#live-toggle.on { color:var(--gold); border-color:rgba(201,168,76,0.55); background:rgba(201,168,76,0.08); }
-#live-results { margin-top:8px; background:rgba(10,10,18,0.9); border:0.5px solid rgba(245,242,235,0.12); border-radius:2px; backdrop-filter:blur(10px); max-height:min(30vh, 280px); display:flex; flex-direction:column; }
-#live-results[hidden] { display:none; }
-#live-results.collapsed #live-list { display:none; }
-#live-head { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; border-bottom:0.5px solid rgba(245,242,235,0.08); font-family:var(--mono); font-size:9px; letter-spacing:0.12em; color:var(--gold); }
-#live-collapse { background:none; border:none; color:rgba(245,242,235,0.4); font-family:var(--mono); font-size:14px; cursor:pointer; line-height:1; padding:0 4px; }
-#live-list { overflow-y:auto; padding:4px 0; }
-.live-item { padding:7px 12px; cursor:pointer; border-left:2px solid transparent; transition:background 0.15s, border-color 0.15s; }
-.live-item:hover, .live-item:focus-visible { background:rgba(245,242,235,0.04); border-left-color:var(--gold); outline:none; }
-.live-title { font-family:var(--serif); font-size:13px; line-height:1.35; color:var(--paper); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.live-meta { font-family:var(--mono); font-size:9px; letter-spacing:0.05em; color:rgba(245,242,235,0.38); margin-top:3px; display:flex; flex-wrap:wrap; gap:4px 10px; align-items:center; }
-.live-badge { font-size:8px; letter-spacing:0.12em; padding:1px 5px; border-radius:1px; border:0.5px solid currentColor; }
-.live-badge.in { color:#3dd9a4; }
-.live-badge.new { color:var(--gold); }
-.live-meta a { color:rgba(245,242,235,0.55); text-decoration:none; border-bottom:0.5px dotted rgba(245,242,235,0.3); }
-.live-meta a:hover { color:var(--gold); }
-.live-note { padding:10px 12px; font-family:var(--mono); font-size:10px; line-height:1.6; color:rgba(245,242,235,0.45); }
-.live-note a { color:var(--gold); }
-#live-pill.off .es-dot { background:rgba(245,242,235,0.25); animation:none; }
-#live-pill.limited .es-dot { background:#f9c74f; animation:none; }
-
-#detail-panel.open ~ #settings-trigger, #detail-panel.open ~ #settings-panel { display:none; }
-
-/* Detail extras */
-#detail-venue { font-family:var(--mono); font-size:9px; letter-spacing:0.06em; color:rgba(245,242,235,0.35); margin-top:4px; }
-#detail-venue:empty { display:none; }
-#detail-links { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
-.detail-link { font-family:var(--mono); font-size:9px; letter-spacing:0.1em; text-transform:uppercase; color:var(--paper); text-decoration:none; padding:5px 9px; border:0.5px solid rgba(245,242,235,0.15); border-radius:2px; transition:border-color 0.15s, color 0.15s; }
-.detail-link:hover { border-color:var(--gold); color:var(--gold); }
-.detail-empty { font-family:var(--mono); font-size:9px; color:rgba(245,242,235,0.3); padding:4px 0; }
-
-@media (max-width: 720px) {
-  #time-travel, #meteor-fact, #instructions, #star-count, .tagline, .elastic-pill { display:none; }
-  #hud-top { padding:16px; }
-  body #wormhole-btn { right:56px; top:12px; }
-  #search-area { top:58px; }
-  .chip:nth-child(n+4) { display:none; }
-  /* Legend becomes one scrollable row along the bottom */
-  #legend { left:0; right:0; bottom:12px; flex-direction:row; gap:14px; overflow-x:auto; padding:0 16px 4px; scrollbar-width:none; }
-  #legend::-webkit-scrollbar { display:none; }
-  .legend-group-header { display:none; }
-  .legend-row { white-space:nowrap; flex-shrink:0; }
-  #detail-panel { width:100%; }
-}
-
-/* High Contrast mode */
-body.high-contrast .wordmark, body.high-contrast #detail-title { color:#fff !important; text-shadow: 0 0 10px rgba(255,255,255,0.5); }
-body.high-contrast #canvas { filter: saturate(1.5) contrast(1.2); }
-`;
-document.head.appendChild(style);
 
 // ── Wire up interactions ──────────────────────────────────────────────────────
 
@@ -423,25 +225,53 @@ document.querySelectorAll('.chip').forEach(chip => {
 
 document.getElementById('detail-close').addEventListener('click', closeDetail);
 
-// Legend: delegate - rows added dynamically after galaxy loads
-document.getElementById('legend').addEventListener('click', e => {
-  const row = e.target.closest('.legend-row');
-  if (!row) return;
-  document.querySelectorAll('.legend-row').forEach(r => r.classList.remove('active'));
-  row.classList.add('active');
-  const cluster = row.dataset.cluster;
-  import('./galaxy.js').then(({ filterCluster }) => {
-    if (cluster === 'all') clearHighlights();
-    filterCluster(cluster);
-  });
-});
-
 // ── Search (local galaxy + live OpenAlex) ─────────────────────────────────────
 
 const LIVE_KEY = 'search-comete-live';
 let liveEnabled = (() => { try { return localStorage.getItem(LIVE_KEY) !== '0'; } catch { return true; } })();
 let searchSeq = 0;          // ignore results from searches that were superseded
 let localHits = [];
+let lastLive = [];
+
+// Reciprocal-rank fusion of word matches and meaning matches
+async function _blendMeaning(q, wordHits) {
+  const sem = await semanticSearch(q, 30);
+  const score = new Map(), byId = new Map();
+  wordHits.forEach((h, r) => { score.set(String(h.id), 1 / (60 + r)); byId.set(String(h.id), h); });
+  sem.forEach(({ star, score: sim }, r) => {
+    if (sim < 0.35) return;
+    const id = String(star.id);
+    score.set(id, (score.get(id) || 0) + 1 / (60 + r));
+    if (!byId.has(id)) byId.set(id, { ...star, cite: star.cite ?? 0 });
+  });
+  const ranked = [...score.entries()].sort((a, b) => b[1] - a[1]).slice(0, 30);
+  const top = ranked[0]?.[1] || 1;
+  return ranked.map(([id, s]) => ({ ...byId.get(id), score: Math.min(0.99, s / top) }));
+}
+
+// Model finished loading during a search: upgrade that search in place
+async function _refineWithMeaning(q, seq) {
+  const blended = await _blendMeaning(q, localHits);
+  if (seq !== searchSeq || !blended.length) return;
+  localHits = blended;
+  highlightStars(localHits.map(r => r.id));
+  if (getMode() === 'universe') addToUniverse(localHits.slice(0, 12));
+  else if (lastLive.length) _placeByMeaning(lastLive, seq);
+}
+
+// Move live-result stars to where they belong by meaning
+async function _placeByMeaning(visitors, seq) {
+  const placed = [];
+  for (const v of visitors) {
+    const b = await belonging(v.paper).catch(() => null);
+    if (seq !== searchSeq) return;
+    if (!b) { placed.push(v); continue; }
+    v.paper.cluster = v.paper.cluster || b.cluster;
+    v.paper.belongs = b;
+    placed.push({ ...v, x: b.position.x + (Math.random() - 0.5) * 1.6, y: b.position.y + (Math.random() - 0.5) * 1.6, z: b.position.z + (Math.random() - 0.5) * 1.6 });
+  }
+  setVisitors(placed);
+}
 
 const liveToggle = document.getElementById('live-toggle');
 const liveBox    = document.getElementById('live-results');
@@ -452,7 +282,7 @@ function _syncLiveToggle() {
   liveToggle.classList.toggle('on', liveEnabled);
   liveToggle.setAttribute('aria-pressed', String(liveEnabled));
   livePill.classList.toggle('off', !liveEnabled);
-  document.getElementById('live-pill-text').textContent = liveEnabled ? 'OPENALEX · LIVE' : 'OFFLINE INDEX';
+  document.getElementById('live-pill-text').textContent = liveEnabled ? 'OPENALEX' : 'OFFLINE';
 }
 _syncLiveToggle();
 
@@ -489,9 +319,14 @@ async function triggerSearch() {
     return;
   }
 
-  // 1. Instant: search the galaxy itself
+  // 1. Instant: search the galaxy itself (words, plus meaning once the small
+  // embedding model is loaded - the first search starts loading it)
   localHits = await doSearch(q);
   if (seq !== searchSeq) return;
+  if (meaningReady()) localHits = await _blendMeaning(q, localHits);
+  else loadMeaning().then(() => { if (seq === searchSeq) _refineWithMeaning(q, seq); }).catch(() => {});
+  if (seq !== searchSeq) return;
+  if (getMode() === 'universe') addToUniverse(localHits.slice(0, 12));
 
   if (localHits.length) {
     _flashLabel(`${localHits.length} PAPERS IN THIS GALAXY`);
@@ -539,7 +374,13 @@ async function _runLiveSearch(q, seq) {
     const spot = _placeVisitor(p);
     if (spot) { p.cluster = p.cluster || spot.cluster; visitors.push({ paper: p, ...spot.pos }); }
   });
-  setVisitors(visitors);
+  if (getMode() === 'universe') {
+    addToUniverse(live.results, new Map(visitors.map(v => [String(v.paper.id), { x: v.x, y: v.y, z: v.z }])));
+  } else {
+    setVisitors(visitors);
+    if (meaningReady()) _placeByMeaning(visitors, seq);
+  }
+  lastLive = visitors;
   if (inGalaxy.length) highlightStars([...localHits.map(r => r.id), ...inGalaxy]);
 
   document.getElementById('live-summary').textContent =
@@ -618,16 +459,58 @@ window.addEventListener('detail:opened', e => {
 });
 window.addEventListener('detail:closed', () => _setUrlParam('paper', null));
 
+// Keep the galaxy centred in the space the dock and dossier leave free
+function _syncViewShift() {
+  if (innerWidth <= 900) return setViewShift(0);
+  const dock = document.getElementById('dock');
+  const left = dock.classList.contains('collapsed') ? 0 : dock.offsetWidth + 16;
+  const right = document.getElementById('detail-panel').classList.contains('open') ? document.getElementById('detail-panel').offsetWidth + 16 : 0;
+  setViewShift((left - right) / 2);
+}
+['detail:opened', 'detail:closed', 'resize'].forEach(ev => window.addEventListener(ev, _syncViewShift));
+
+// Topic chips in the dossier run a search
+window.addEventListener('search:run', e => {
+  document.getElementById('search-input').value = e.detail;
+  triggerSearch();
+});
+
 window.addEventListener('keydown', e => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
   if (e.key === '/' && !typing) {
     e.preventDefault();
     document.getElementById('search-input').focus();
   } else if (e.key === 'Escape') {
-    if (document.getElementById('detail-panel').classList.contains('open')) closeDetail();
+    if (document.getElementById('compare').classList.contains('open')) closeCompare();
+    else if (document.getElementById('detail-panel').classList.contains('open')) closeDetail();
     else if (typing) document.activeElement.blur();
   }
 });
+
+// ── Galaxy / My universe ──────────────────────────────────────────────────────
+
+function _initModeSwitch() {
+  const sw = document.getElementById('mode-switch');
+  const hint = document.getElementById('universe-hint');
+  const sync = () => {
+    const m = getMode(), n = universeSize();
+    sw.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
+    document.getElementById('universe-count').textContent = n ? `· ${n}` : '';
+    hint.hidden = !(m === 'universe' && n === 0);
+    document.body.classList.toggle('universe-mode', m === 'universe');
+  };
+  sw.addEventListener('click', e => {
+    const b = e.target.closest('button[data-mode]');
+    if (!b) return;
+    setMode(b.dataset.mode);
+    _flashLabel(b.dataset.mode === 'universe' ? 'MY UNIVERSE · EVERYTHING YOU FIND STAYS' : 'FULL GALAXY · 54k PAPERS', 2200);
+  });
+  document.getElementById('universe-clear').addEventListener('click', () => clearUniverse());
+  hint.querySelectorAll('[data-q]').forEach(b => b.addEventListener('click', () =>
+    window.dispatchEvent(new CustomEvent('search:run', { detail: b.dataset.q }))));
+  onUniverseChange(sync);
+  sync();
+}
 
 // ── Load stars ────────────────────────────────────────────────────────────────
 
@@ -660,8 +543,11 @@ function _expandCompact(d) {
       cluster,
       color:   d.colors[cluster],
       x: d.xyz[i*3] / k, y: d.xyz[i*3+1] / k, z: d.xyz[i*3+2] / k,
+      crowd: d.crowd?.[i],
     };
   }
+  // Positions are final scene coordinates (pipeline/layout.py)
+  if (d.layout === 'scene') out.sceneAnchors = d.anchors;
   return out;
 }
 
@@ -728,42 +614,6 @@ async function loadStars() {
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
-// Full label map for all 15 clusters + all pipeline variants
-const CLUSTER_META = {
-  // id          label                    group
-  ml:    { label: 'Machine Learning',  group: 'AI & Computing'   },
-  cs:    { label: 'Computer Science',  group: 'AI & Computing'   },
-  math:  { label: 'Mathematics',       group: 'Formal Sciences'  },
-  phys:  { label: 'Physics',           group: 'Natural Sciences' },
-  astro: { label: 'Astronomy',         group: 'Natural Sciences' },
-  chem:  { label: 'Chemistry',         group: 'Natural Sciences' },
-  bio:   { label: 'Biology',           group: 'Life Sciences'    },
-  neuro: { label: 'Neuroscience',      group: 'Life Sciences'    },
-  med:   { label: 'Medicine',          group: 'Life Sciences'    },
-  mat:   { label: 'Materials Science', group: 'Natural Sciences' },
-  eng:   { label: 'Engineering',       group: 'Applied Sciences' },
-  env:   { label: 'Environment',       group: 'Applied Sciences' },
-  econ:  { label: 'Economics',         group: 'Social Sciences'  },
-  psych: { label: 'Psychology',        group: 'Social Sciences'  },
-  edu:   { label: 'Education',         group: 'Social Sciences'  },
-  // pipeline full-name variants
-  machine_learning:  { label: 'Machine Learning',  group: 'AI & Computing'   },
-  computer_science:  { label: 'Computer Science',  group: 'AI & Computing'   },
-  mathematics:       { label: 'Mathematics',       group: 'Formal Sciences'  },
-  physics:           { label: 'Physics',           group: 'Natural Sciences' },
-  astronomy:         { label: 'Astronomy',         group: 'Natural Sciences' },
-  chemistry:         { label: 'Chemistry',         group: 'Natural Sciences' },
-  biology:           { label: 'Biology',           group: 'Life Sciences'    },
-  neuroscience:      { label: 'Neuroscience',      group: 'Life Sciences'    },
-  medicine:          { label: 'Medicine',          group: 'Life Sciences'    },
-  materials_science: { label: 'Materials Science', group: 'Natural Sciences' },
-  engineering:       { label: 'Engineering',       group: 'Applied Sciences' },
-  environment:       { label: 'Environment',       group: 'Applied Sciences' },
-  economics:         { label: 'Economics',         group: 'Social Sciences'  },
-  psychology:        { label: 'Psychology',        group: 'Social Sciences'  },
-  education:         { label: 'Education',         group: 'Social Sciences'  },
-};
-
 function buildMeteorFact(stars) {
   const meteor = document.getElementById('meteor-fact');
   if (!meteor || !stars.length) return;
@@ -792,87 +642,6 @@ function buildMeteorFact(stars) {
     if (pos) flyTo(pos);
     showDetail(pick.star);
   };
-}
-
-function _getClusterMeta(id) {
-  return CLUSTER_META[id] || CLUSTER_META[id?.toLowerCase()] || {
-    label: (id || 'Unknown').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-    group: 'Other',
-  };
-}
-
-function _buildLegend(stars) {
-  const clusterIds = [...new Set(stars.map(s => s.cluster).filter(Boolean))].sort();
-  const legend = document.getElementById('legend');
-
-  const groups = {};
-  clusterIds.forEach(id => {
-    const meta = _getClusterMeta(id);
-    if (!groups[meta.group]) groups[meta.group] = [];
-    groups[meta.group].push(id);
-  });
-
-  const allRow = legend.querySelector('[data-cluster="all"]');
-  legend.innerHTML = '';
-  if (allRow) legend.appendChild(allRow);
-
-  if (!document.getElementById('legend-subgroup-style')) {
-    const s = document.createElement('style');
-    s.id = 'legend-subgroup-style';
-    s.textContent = `
-      .legend-group-header {
-        font-family: var(--mono);
-        font-size: 8px;
-        letter-spacing: 0.18em;
-        color: rgba(245,242,235,0.2);
-        text-transform: uppercase;
-        margin-top: 10px;
-        margin-bottom: 2px;
-        padding-left: 15px;
-        pointer-events: none;
-        user-select: none;
-      }
-      .legend-group-header:first-of-type { margin-top: 6px; }
-    `;
-    document.head.appendChild(s);
-  }
-
-  const groupOrder = [
-    'AI & Computing',
-    'Formal Sciences',
-    'Natural Sciences',
-    'Life Sciences',
-    'Applied Sciences',
-    'Social Sciences',
-    'Other'
-  ];
-
-  groupOrder.forEach(groupName => {
-    const ids = groups[groupName];
-    if (!ids || !ids.length) return;
-
-    const header = document.createElement('div');
-    header.className = 'legend-group-header';
-    header.textContent = groupName;
-    legend.appendChild(header);
-
-    ids.forEach(id => {
-      const meta = _getClusterMeta(id);
-      const colorHex = CLUSTER_COLORS[id];
-      const hex = colorHex ? '#' + colorHex.toString(16).padStart(6, '0') : '#888888';
-
-      const row = document.createElement('div');
-      row.className = 'legend-row';
-      row.dataset.cluster = id;
-      row.innerHTML = `<div class="legend-dot" style="background:${hex}"></div>${meta.label.toUpperCase()}`;
-      legend.appendChild(row);
-    });
-  });
-
-  console.log(
-    '[main] Legend built -',
-    Object.keys(groups).map(g => `${g}: ${groups[g].join(',')}`).join(' | ')
-  );
 }
 
 // ── COMET ADDITION: click handler ─────────────────────────────────────────────
@@ -995,46 +764,25 @@ loadStars().then(async stars => {
   document.getElementById('galaxy-loader').style.transition = 'opacity 0.8s ease';
   document.getElementById('galaxy-loader').style.opacity = '0';
   setTimeout(() => { document.getElementById('galaxy-loader').style.display = 'none'; }, 800);
-  document.getElementById('star-count').textContent = `${stars.length.toLocaleString()} PAPERS MAPPED`;
-  document.getElementById('tagline').textContent =
-    `${stars.length.toLocaleString()} papers · closeness = similar meaning · live search across 250M+ works`;
-
   buildMeteorFact(stars);
 
-  let minYear = Infinity, maxYear = -Infinity;
-  stars.forEach(s => {
-    const y = Number(s.year);
-    if (y > 0) { minYear = Math.min(minYear, y); maxYear = Math.max(maxYear, y); }
-  });
-
-  const slider = document.getElementById('year-slider');
-  const readout = document.getElementById('year-readout');
-
-  slider.min = minYear;
-  slider.max = maxYear;
-  slider.step = 1;
-  slider.value = maxYear;
-
-  const syncYear = () => {
-    const y = Number(slider.value);
-    if (y >= maxYear) {
-      setActiveYear(Infinity);
-      readout.textContent = 'ALL YEARS';
-    } else {
-      setActiveYear(y);
-      readout.textContent = `VISIBLE THROUGH ${y}`;
-    }
-  };
-
-  slider.addEventListener('input', syncYear);
-  syncYear();
-
-  // Give the corpus to both search.js and panel.js
+  // Give the corpus to search, the dossier and the workspace
   setSearchCorpus(stars);
   setCorpus(stars);
-
-  // Rebuild legend after initGalaxy so CLUSTER_COLORS is populated
-  requestAnimationFrame(() => _buildLegend(stars));
+  initPanel();
+  setMeaningCorpus(stars);
+  initWorkspace(stars);
+  initUniverse();
+  _initModeSwitch();
+  initTimeline(stars);
+  initLabels(stars, fieldLabel, id => focusField(id));
+  _syncViewShift();
+  let sectorClock = 0;
+  registerFrameHook(delta => {
+    updateLabels();
+    sectorClock += delta;
+    if (sectorClock > 0.25) { sectorClock = 0; updateSector(); }
+  });
 
   // ── COMET ADDITION: initialise comet system ───────────────────────────────
   const canvas  = document.getElementById('canvas');
@@ -1125,6 +873,8 @@ loadStars().then(async stars => {
 
   // Wormhole - pass galaxy renderer so it can flip the canvas bg color
   initWormhole((newMode) => setTheme(newMode), getRenderer());
+  const wormBtn = document.getElementById('wormhole-btn');
+  if (wormBtn) { wormBtn.classList.add('icon-btn'); document.getElementById('wormhole-slot').replaceWith(wormBtn); }
 
   // ── END SOUND + WORMHOLE ADDITIONS ───────────────────────────────────────
 
@@ -1150,7 +900,6 @@ async function _openFromUrl(stars) {
       setTimeout(() => showDetail(star), q ? 900 : 0);
     } else {
       try {
-        const { getWork } = await import('./live.js');
         showDetail(await getWork(id));
       } catch (e) {
         console.warn('[url] could not open paper', paperId, e.message);

@@ -8,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.3.2",
     "lil-gui": "^0.19.1",
     "three": "^0.160.0"
   },

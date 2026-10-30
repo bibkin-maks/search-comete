@@ -34,7 +34,9 @@ const VERT = /* glsl */`
   attribute float aSeed;
   attribute float aKind;
   attribute float aAlpha;
+  attribute float aBorn;
   uniform float uScale;
+  uniform float uClock;
   varying vec2  vUv;
   varying vec3  vColor;
   varying float vSeed;
@@ -45,12 +47,15 @@ const VERT = /* glsl */`
     // Billboard: expand the quad along the camera's right/up axes
     vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
     vec3 up    = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
-    vec3 wp    = aCenter + (right * position.x + up * position.y) * aSize * 2.0;
+    // Grow in after birth (new tree nodes); old orbs have aBorn far in the past
+    float grow = clamp((uClock - aBorn) / 0.7, 0.0, 1.0);
+    grow = grow * (2.0 - grow);
+    vec3 wp    = aCenter + (right * position.x + up * position.y) * aSize * 2.0 * grow;
     vec4 mv    = viewMatrix * vec4(wp, 1.0);
 
     // Orb diameter on screen in px - fade in between 5 and 16 px
     float px = aSize * uScale / max(-mv.z, 0.001);
-    vAlpha   = aAlpha * smoothstep(5.0, 16.0, px);
+    vAlpha   = aAlpha * smoothstep(5.0, 16.0, px) * grow;
 
     gl_Position = vAlpha < 0.002 ? vec4(2.0, 2.0, 2.0, 1.0) : projectionMatrix * mv;
     vUv    = position.xy * 2.0;   // -1..1, the orb itself has radius 0.5
@@ -174,6 +179,7 @@ export class HeroOrbs {
     this._seed   = new Float32Array(MAX_ORBS);
     this._kind   = new Float32Array(MAX_ORBS);
     this._alpha  = new Float32Array(MAX_ORBS);
+    this._born   = new Float32Array(MAX_ORBS).fill(-1e6);
     this._attrs = {
       aCenter: new THREE.InstancedBufferAttribute(this._center, 3),
       aColor:  new THREE.InstancedBufferAttribute(this._color, 3),
@@ -181,6 +187,7 @@ export class HeroOrbs {
       aSeed:   new THREE.InstancedBufferAttribute(this._seed, 1),
       aKind:   new THREE.InstancedBufferAttribute(this._kind, 1),
       aAlpha:  new THREE.InstancedBufferAttribute(this._alpha, 1),
+      aBorn:   new THREE.InstancedBufferAttribute(this._born, 1),
     };
     Object.entries(this._attrs).forEach(([name, attr]) => geo.setAttribute(name, attr));
     geo.instanceCount = 0;
@@ -190,6 +197,7 @@ export class HeroOrbs {
         uTime:   { value: 0 },
         uScale:  { value: 1 },
         uDetail: { value: 1 },
+        uClock:  { value: 0 },
       },
       vertexShader:   VERT,
       fragmentShader: FRAG,
@@ -221,14 +229,16 @@ export class HeroOrbs {
       this._seed[i]  = o.seed;
       this._kind[i]  = o.kind;
       this._alpha[i] = o.alpha ?? 1;
+      this._born[i]  = o.born ?? -1e6;
     }
     Object.values(this._attrs).forEach(attr => { attr.needsUpdate = true; });
     this.mesh.geometry.instanceCount = n;
     this.count = n;
   }
 
-  update(time, scale, detail) {
+  update(time, scale, detail, clock) {
     const u = this.material.uniforms;
+    u.uClock.value  = clock;
     u.uTime.value   = time;
     u.uScale.value  = scale;
     u.uDetail.value = detail;

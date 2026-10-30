@@ -20,6 +20,8 @@ import * as THREE from 'three';
 import { showDetail } from './panel.js';
 import { initPostProcessing, resizePostProcessing, updateAndRender, setPostQuality } from './postfx.js';
 import { HeroOrbs, ORB_STAR, ORB_BLACK_HOLE, ORB_VISITOR } from './orb.js';
+import { buildSpace, updateSpace } from './space.js';
+import { LinkLayer } from './links.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -44,6 +46,7 @@ const BH_CITE    = 15000;   // ...and above this they are black holes
 const FLAG_HIT    = 1;
 const FLAG_PINNED = 2;
 const FLAG_BIG    = 4;
+const FLAG_FOUND  = 8;   // part of "my universe"
 
 // Live reference - populated in _discoverClusters(), imported by main.js
 export const CLUSTER_COLORS = {};
@@ -72,13 +75,18 @@ let highlightOn  = false;
 let hitIndices   = [];
 let selectedIdx  = -1;
 let hoveredIdx   = -1;          // star index, or -(visitorIdx + 2) for visitors
-let visitors     = [];          // { paper, x, y, z, rgb, seed }
+let visitors     = [];          // flattened visitorGroups: { paper, x, y, z, rgb, seed, kind, size }
+const visitorGroups = new Map(); // 'live' | 'web' -> visitors
+let webLinks, ropeLinks;
+let skyTexture = null;
+let velTheta = 0, velPhi = 0;   // drag inertia
+let viewShift = 0, viewShiftTarget = 0;   // px: keeps the scene centred between side panels
 const pinnedIds  = new Set();
 
 const pivot       = new THREE.Vector3(0, 0, 0);
 const pivotTarget = new THREE.Vector3(0, 0, 0);
-let camTheta = 0, camPhi = 1.3, camR = 220;
-let tgtTheta = 0, tgtPhi = 1.3, tgtR = 220;
+let camTheta = 0, camPhi = 1.3, camR = 520;
+let tgtTheta = 0, tgtPhi = 1.3, tgtR = 380;
 
 let isDragging = false, lastMX = 0, lastMY = 0, mouseMoved = false;
 let autoRotate = true;
@@ -90,6 +98,8 @@ let pointerOnCanvas = false;
 let reducedMotion = false;
 let detail = 1;                 // shader detail: 1 high, 0.5 medium, 0 low
 let lightMode = false;
+let ghost = false;              // "my universe": galaxy fades to dust, only found papers shine
+let nebulae = [];
 
 const dummy = new THREE.Object3D();
 
@@ -148,6 +158,10 @@ function _sizeForCite(cite) {
   return 0.24 + norm * 0.62;
 }
 
+function _visitorVisible(v) {
+  return !(Number.isFinite(activeYear) && Number(v.paper.year) > activeYear);
+}
+
 function _isVisible(i) {
   if (Number.isFinite(activeYear) && yearArr[i] > activeYear) return false;
   if (focusCluster !== null && clusterIds[clusterArr[i]] !== focusCluster) return false;
@@ -178,7 +192,8 @@ function _discoverClusters(list) {
   clusterIds = names;
 }
 
-// Each cluster's UMAP box is rescaled into an 36-unit cube around its anchor
+// Fallback data only: rescale each cluster's UMAP box into a cube around its
+// anchor. galaxy.json comes pre-laid-out by pipeline/layout.py.
 function _remapStars(list) {
   const groups = {};
   list.forEach(s => { (groups[s.cluster] ||= []).push(s); });
@@ -216,18 +231,27 @@ export function initGalaxy(canvas, input) {
 
   scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0x06060f, 0.0008);
-  camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 900);
+  camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 2400);
 
   _discoverClusters(input);
-  stars = _remapStars(input);
+  if (input.sceneAnchors) {
+    // galaxy.json already holds final positions (pipeline/layout.py)
+    Object.entries(input.sceneAnchors).forEach(([c, a]) => { CLUSTER_ANCHORS[c] = new THREE.Vector3(...a); });
+    stars = input.map(s => ({ ...s, cite: Number(s.cite ?? s.citations ?? 0) || 0 }));
+  } else {
+    stars = _remapStars(input);
+  }
 
-  _buildBackground();
+  buildSpace(scene, renderer);
+  skyTexture = scene.background;
   _buildNebulae();
   _buildStarField();
   _buildEdges();
   _buildInterClusterLines();
   _buildDisks();
   heroOrbs = new HeroOrbs(scene);
+  webLinks = new LinkLayer(scene, { beadsPerLink: 1 });
+  ropeLinks = new LinkLayer(scene, { beadsPerLink: 5 });
   _syncOrbs();
   _buildRing();
   _bindControls(canvas);
@@ -248,6 +272,7 @@ const STAR_VERT = /* glsl */`
   uniform float uMotion;
   uniform float uHover;
   uniform float uSelected;
+  uniform float uGhost;
   attribute vec3  aColor;
   attribute float aSize;
   attribute float aSeed;
@@ -255,11 +280,13 @@ const STAR_VERT = /* glsl */`
   attribute float aCluster;
   attribute float aFlags;
   attribute float aIndex;
+  attribute float aDim;
   varying vec3  vColor;
   varying float vSeed;
   varying float vBright;
   varying float vPx;
   varying float vBig;
+  varying float vSize;
 
   void main() {
     bool hidden = aYear > uYear || (uFocus > -0.5 && abs(aCluster - uFocus) > 0.5);
@@ -276,6 +303,8 @@ const STAR_VERT = /* glsl */`
       else           { size *= 0.6; bright = 0.18; }
     }
     if (pinned > 0.5) { col = vec3(1.0, 0.784, 0.341); size *= 1.5; bright = max(bright, 1.3); }
+    float found = step(7.5, mod(aFlags, 16.0));
+    if (uGhost > 0.5 && found < 0.5 && hit < 0.5 && pinned < 0.5) { bright *= 0.06; size *= 0.7; }
     if (abs(aIndex - uHover) < 0.5 || abs(aIndex - uSelected) < 0.5) { size *= 1.45; bright *= 1.4; }
 
     // Twinkle + slow wobble (both off with reduced motion)
@@ -289,6 +318,8 @@ const STAR_VERT = /* glsl */`
     gl_Position = projectionMatrix * mv;
 
     float px = size * uScale / max(-mv.z, 0.01);
+    // Crowded stars dim once they're big enough on screen to pile up into white
+    bright *= mix(1.0, aDim, smoothstep(2.0, 7.0, px));
     // Sub-pixel stars keep a 2px sprite but fade, so far clusters shimmer instead of aliasing
     bright *= clamp(px / 2.0, 0.2, 1.0);
     gl_PointSize = clamp(px, 2.0, 160.0);
@@ -298,6 +329,7 @@ const STAR_VERT = /* glsl */`
     vSeed   = aSeed;
     vBright = bright;
     vBig    = step(3.5, mod(aFlags, 8.0));
+    vSize   = aSize;
   }
 `;
 
@@ -310,6 +342,7 @@ const STAR_FRAG = /* glsl */`
   varying float vBright;
   varying float vPx;
   varying float vBig;
+  varying float vSize;
 
   void main() {
     vec2  uv = gl_PointCoord * 2.0 - 1.0;
@@ -317,12 +350,20 @@ const STAR_FRAG = /* glsl */`
     if (r2 > 1.0) discard;
     float r = sqrt(r2);
 
-    // Halos fade as sprites grow on screen, so dense regions don't blow out
-    // to white when you fly into them
+    // Crisp core with a 1px anti-aliased edge, never more than ~3px in
+    // radius: far away a star is a sharp dot, up close a bright point with a
+    // soft glow rather than a flat disc.
+    float aa    = 2.0 / max(vPx, 1.0);
+    float pxR   = clamp(vPx * 0.31, 1.1, 3.2);
+    float coreR = 2.0 * pxR / max(vPx, 1.0);
+    float core  = 1.0 - smoothstep(coreR - aa, coreR + aa, r);
+    float bloom = exp(-pow(r / (coreR * 2.6), 2.0)) * 0.5;
+    // Wide glow only on bright papers, and it fades as sprites grow on screen
+    // so dense regions don't blow out to white when you fly into them
+    float bigness = smoothstep(0.35, 0.8, vSize);
     float crowd = clamp(7.0 / vPx, 0.15, 1.0);
-    float core  = exp(-r2 * 32.0);
-    float halo  = (exp(-r2 * 6.0) * 0.42 + exp(-r * 4.5) * 0.12) * crowd;
-    float shape = core + halo;
+    float halo  = (exp(-r2 * 6.0) * (0.08 + 0.34 * bigness) + exp(-r * 4.5) * 0.06 * bigness) * crowd;
+    float shape = core + bloom + halo;
 
     // Species details only show once a star is big enough on screen
     float zoom = smoothstep(7.0, 18.0, vPx) * uDetail;
@@ -355,10 +396,10 @@ const STAR_FRAG = /* glsl */`
 
     // Big sprites get dimmer per pixel: same total light, less white-out in clumps
     float dense = clamp(16.0 / vPx, 0.4, 1.0);
-    float alpha = shape * vBright * dense * (1.0 - smoothstep(0.82, 1.0, r));
+    float alpha = (core + (shape - core) * dense) * vBright * (1.0 - smoothstep(0.82, 1.0, r));
     vec3  col   = uLight > 0.5
       ? vColor * 0.62
-      : mix(vColor, vec3(1.0), clamp(core * 0.65, 0.0, 1.0));
+      : mix(vColor, vec3(1.0), clamp(core * (0.15 + 0.5 * bigness), 0.0, 1.0));
     gl_FragColor = vec4(col, clamp(alpha, 0.0, 1.0));
   }
 `;
@@ -375,6 +416,7 @@ function _buildStarField() {
   const years  = new Float32Array(n);
   const clus   = new Float32Array(n);
   const index  = new Float32Array(n);
+  const dim    = new Float32Array(n);
 
   idToIndex.clear();
   clusterMembers = {};
@@ -394,6 +436,7 @@ function _buildStarField() {
     clusterArr[i] = clus[i] = clusterIdx[s.cluster] ?? 0;
     flagsArr[i] = (s.cite > HERO_CITE ? FLAG_BIG : 0) | (pinnedIds.has(String(s.id)) ? FLAG_PINNED : 0);
     index[i] = i;
+    dim[i] = s.crowd ? Math.min(1, Math.max(0.25, Math.sqrt(12 / Math.max(s.crowd, 12)))) : 1;
 
     idToIndex.set(String(s.id), i);
     (clusterMembers[s.cluster] ||= []).push(i);
@@ -409,6 +452,7 @@ function _buildStarField() {
   geo.setAttribute('aCluster', new THREE.BufferAttribute(clus, 1));
   geo.setAttribute('aFlags',   new THREE.BufferAttribute(flagsArr, 1));
   geo.setAttribute('aIndex',   new THREE.BufferAttribute(index, 1));
+  geo.setAttribute('aDim',     new THREE.BufferAttribute(dim, 1));
 
   starMat = new THREE.ShaderMaterial({
     uniforms: {
@@ -420,6 +464,7 @@ function _buildStarField() {
       uMotion:    { value: 1 },
       uHover:     { value: -1 },
       uSelected:  { value: -1 },
+      uGhost:     { value: 0 },
       uDetail:    { value: 1 },
       uLight:     { value: 0 },
     },
@@ -445,6 +490,7 @@ function _flagsChanged() {
 
 function _orbAlpha(i) {
   if (!_isVisible(i)) return 0;
+  if (ghost && !(flagsArr[i] & (FLAG_FOUND | FLAG_HIT | FLAG_PINNED)) && i !== selectedIdx) return 0;
   if (highlightOn && !(flagsArr[i] & FLAG_HIT) && i !== selectedIdx) return 0.12;
   return 1;
 }
@@ -481,7 +527,7 @@ function _syncOrbs() {
   }
   visitors.forEach(v => {
     items.push({ x: v.x, y: v.y, z: v.z, r: v.rgb[0], g: v.rgb[1], b: v.rgb[2],
-      size: 0.6, seed: v.seed, kind: ORB_VISITOR, alpha: 1 });
+      size: v.size, seed: v.seed, kind: v.kind, alpha: _visitorVisible(v) ? 1 : 0, born: v.born });
   });
   heroOrbs.set(items);
   _syncDisks();
@@ -608,6 +654,8 @@ export function setActiveYear(year) {
   if (!starMat) return;
   activeYear = Number.isFinite(year) ? year : Infinity;
   starMat.uniforms.uYear.value = Number.isFinite(activeYear) ? activeYear : 1e9;
+  webLinks?.setYear(starMat.uniforms.uYear.value);
+  ropeLinks?.setYear(starMat.uniforms.uYear.value);
   if (edgeSegments) edgeSegments.material.opacity = Number.isFinite(activeYear) ? 0.18 : 0.45;
   _syncOrbs();
 }
@@ -643,7 +691,7 @@ export function filterCluster(clusterId) {
     focusCluster = null;
     starMat.uniforms.uFocus.value = -1;
     pivotTarget.set(0, 0, 0);
-    tgtR = 85;
+    tgtR = 380;
     _syncOrbs();
     return;
   }
@@ -659,7 +707,7 @@ export function filterCluster(clusterId) {
     const dir = anchor.clone().normalize();
     tgtTheta = Math.atan2(dir.x, dir.z) + 0.3;
     tgtPhi   = Math.acos(Math.max(-1, Math.min(1, dir.y))) * 0.8 + 0.3;
-    tgtR = 22;
+    tgtR = 78;
     _warp();
   }
 }
@@ -704,21 +752,77 @@ function _nearest(x, y, z, pool, k, skip) {
 }
 
 /**
- * Live search results that aren't in the galaxy, shown as visitor orbs.
+ * Papers that aren't in the galaxy but should be shown in it: live search
+ * results ('live', gold ringed) and citation-web nodes ('web', plain orbs).
  * @param {Array<{paper, x, y, z}>} list  scene positions
  */
-export function setVisitors(list) {
-  visitors = list.map(v => ({
-    ...v,
-    rgb: _rgb(CLUSTER_COLORS[v.paper.cluster] ?? 0xffd27a),
-    seed: _hashSeed(String(v.paper.id)),
+export function setVisitors(list, group = 'live') {
+  visitorGroups.set(group, list.map(v => {
+    const cite = Number(v.paper.cite) || 0;
+    return {
+      ...v,
+      rgb:  _rgb(CLUSTER_COLORS[v.paper.cluster] ?? 0xffd27a),
+      seed: _hashSeed(String(v.paper.id)),
+      kind: group === 'live' ? ORB_VISITOR : ORB_STAR,
+      size: group === 'live' ? 0.6 : 0.3 + 0.35 * Math.min(1, Math.log10(cite + 1) / 5),
+    };
   }));
+  visitors = [...visitorGroups.values()].flat();
   _syncOrbs();
 }
 
-export function clearVisitors() {
-  visitors = [];
+export function clearVisitors(group = 'live') {
+  visitorGroups.delete(group);
+  visitors = [...visitorGroups.values()].flat();
   _syncOrbs();
+}
+
+/** Citation web ropes. links: [{ from:{x,y,z}, to:{x,y,z}, color:hex, strength }] */
+export function setWebLinks(links) {
+  webLinks?.set(links.map(l => ({ ...l, color: _rgb(l.color ?? 0x9fb4ff) })));
+}
+
+/** Ropes tied between pinned papers. */
+export function setRopes(links) {
+  ropeLinks?.set(links.map(l => ({ ...l, color: _rgb(l.color ?? 0xffc857), strength: l.strength ?? 1.6 })));
+}
+
+export function getClusterAnchors() {
+  return Object.fromEntries(Object.entries(CLUSTER_ANCHORS).map(([k, v]) => [k, { x: v.x, y: v.y, z: v.z }]));
+}
+
+export function getFocusCluster() { return focusCluster; }
+
+/** "My universe" mode: the galaxy becomes faint dust, found papers shine. */
+export function setGhost(on) {
+  if (!starMat) return;
+  ghost = !!on;
+  starMat.uniforms.uGhost.value = ghost ? 1 : 0;
+  nebulae.forEach(sp => { sp.material.opacity = sp.userData.opacity * (ghost ? 0.25 : 1); });
+  if (edgeSegments) edgeSegments.visible = !ghost;
+  _syncOrbs();
+}
+
+/** Mark galaxy papers that are part of "my universe". */
+export function setFound(ids) {
+  if (!starMat) return;
+  const set = new Set(ids.map(String));
+  for (let i = 0; i < flagsArr.length; i++) {
+    const want = set.has(String(stars[i].id));
+    if (want !== !!(flagsArr[i] & FLAG_FOUND)) flagsArr[i] = want ? (flagsArr[i] | FLAG_FOUND) : (flagsArr[i] & ~FLAG_FOUND);
+  }
+  _flagsChanged();
+  _syncOrbs();
+}
+
+/** Seconds since the scene started: timeline for grow-in animations. */
+export function getClock() { return t; }
+
+/** Shift the scene centre sideways by px (positive = right), eased. */
+export function setViewShift(px) { viewShiftTarget = px; }
+
+export function getView() {
+  return { pivot: { x: pivot.x, y: pivot.y, z: pivot.z }, distance: camR };
 }
 
 export function setTheme(mode) {
@@ -727,6 +831,7 @@ export function setTheme(mode) {
   starMat.uniforms.uLight.value = lightMode ? 1 : 0;
   starMat.blending = lightMode ? THREE.NormalBlending : THREE.AdditiveBlending;
   starMat.needsUpdate = true;
+  scene.background = lightMode ? null : skyTexture;
 }
 
 export function flyTo({ x, y, z }) {
@@ -744,7 +849,7 @@ export function setPivotTarget({ x, y, z }) {
 
 export function flyToCluster({ x, y, z }) {
   pivotTarget.set(x, y, z);
-  tgtR = 28;
+  tgtR = 30;
   const dir = new THREE.Vector3(x, y, z).normalize();
   tgtTheta = Math.atan2(dir.x, dir.z) + 0.4;
   tgtPhi   = Math.acos(Math.max(-1, Math.min(1, dir.y))) * 0.8 + 0.35;
@@ -759,21 +864,6 @@ function _warp() {
 }
 
 // ── Scene builders ────────────────────────────────────────────────────────────
-
-function _buildBackground() {
-  const count = 3000;
-  const pos = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    pos[i*3]   = (Math.random()-0.5)*900;
-    pos[i*3+1] = (Math.random()-0.5)*900;
-    pos[i*3+2] = (Math.random()-0.5)*900;
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({
-    color: 0xffffff, size: 0.07, transparent: true, opacity: 0.14, sizeAttenuation: true,
-  })));
-}
 
 // Wispy procedural nebula per cluster: value-noise fbm in a soft radial mask
 function _nebulaTexture(color, seed) {
@@ -828,6 +918,8 @@ function _buildNebulae() {
       }));
       sp.scale.setScalar(size);
       sp.position.copy(anchor);
+      sp.userData.opacity = opacity;
+      nebulae.push(sp);
       scene.add(sp);
     });
   });
@@ -935,6 +1027,8 @@ function _bindControls(canvas) {
       if (Math.abs(dx) > 2 || Math.abs(dy) > 2) mouseMoved = true;
       tgtTheta -= dx * 0.005;
       tgtPhi    = Math.max(0.15, Math.min(Math.PI-0.15, tgtPhi - dy * 0.004));
+      velTheta = -dx * 0.005;
+      velPhi   = -dy * 0.004;
       lastMX = e.clientX; lastMY = e.clientY;
     }
     mouse2D.x =  (e.clientX / innerWidth)  * 2 - 1;
@@ -943,7 +1037,7 @@ function _bindControls(canvas) {
   });
 
   canvas.addEventListener('wheel', e => {
-    tgtR = Math.max(1.5, Math.min(400, tgtR * (1 + e.deltaY * 0.0012)));
+    tgtR = Math.max(1.5, Math.min(760, tgtR * (1 + e.deltaY * 0.0012)));
     _pauseAutoRotate(5000);
   }, { passive: true });
 
@@ -979,7 +1073,7 @@ function _bindControls(canvas) {
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
       const dist = Math.sqrt(dx*dx + dy*dy);
-      tgtR = Math.max(1.5, Math.min(400, tgtR - (dist - lastTouchDist) * 0.1));
+      tgtR = Math.max(1.5, Math.min(760, tgtR - (dist - lastTouchDist) * 0.1));
       lastTouchDist = dist;
     }
   }, { passive: true });
@@ -1014,6 +1108,14 @@ function _animate() {
   const ease = (perFrame) => 1 - Math.pow(1 - perFrame, delta * 60);
   if (autoRotate && !isDragging && !reducedMotion) tgtTheta += 0.0006 * delta * 60;
 
+  // Fling: keep drifting after a drag, slowing down
+  const decay = Math.pow(isDragging ? 0.7 : 0.92, delta * 60);
+  velTheta *= decay; velPhi *= decay;
+  if (!isDragging && !reducedMotion && (Math.abs(velTheta) > 1e-5 || Math.abs(velPhi) > 1e-5)) {
+    tgtTheta += velTheta * delta * 60 * 0.5;
+    tgtPhi = Math.max(0.15, Math.min(Math.PI - 0.15, tgtPhi + velPhi * delta * 60 * 0.5));
+  }
+
   pivot.lerp(pivotTarget, ease(0.06));
 
   let dTheta = tgtTheta - camTheta;
@@ -1022,6 +1124,12 @@ function _animate() {
   camTheta += dTheta * ease(0.05);
   camPhi   += (tgtPhi - camPhi) * ease(0.05);
   camR     += (tgtR   - camR)   * ease(0.05);
+
+  if (Math.abs(viewShiftTarget - viewShift) > 0.5 || viewShift !== 0) {
+    viewShift += (viewShiftTarget - viewShift) * ease(0.08);
+    if (Math.abs(viewShift) < 0.5 && viewShiftTarget === 0) { viewShift = 0; camera.clearViewOffset(); }
+    else camera.setViewOffset(innerWidth, innerHeight, -viewShift, 0, innerWidth, innerHeight);
+  }
 
   const sinPhi = Math.sin(camPhi);
   camera.position.set(
@@ -1043,7 +1151,10 @@ function _animate() {
   u.uScale.value  = scale;
   u.uMotion.value = motion;
   u.uDetail.value = detail;
-  heroOrbs.update(t * (0.4 + 0.6 * motion), scale, detail);
+  heroOrbs.update(t * (0.4 + 0.6 * motion), scale, detail, t);
+  webLinks.update(t * motion, t, scale);
+  ropeLinks.update(t * motion, t, scale);
+  updateSpace(camera, scale);
   if (diskMesh?.material.userData.shader) diskMesh.material.userData.shader.uniforms.uTime.value = t * motion;
 
   if (ringMesh.visible) ringMesh.lookAt(camera.position);
@@ -1094,7 +1205,7 @@ function _pick() {
     const score = Math.sqrt(Math.max(dist2, 0)) / rad + along * 0.002 + dim;
     if (score < bestScore) { bestScore = score; best = i; }
   }
-  visitors.forEach((v, k) => test(v.x, v.y, v.z, 1.2, -(k + 2), -0.2));
+  visitors.forEach((v, k) => { if (_visitorVisible(v)) test(v.x, v.y, v.z, 1.2, -(k + 2), -0.2); });
 
   if (best === -1) return null;
   if (best <= -2) {

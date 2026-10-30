@@ -549,7 +549,9 @@ const WELCOME_KEY = 'search-comete-welcomed';
 function _showWelcome(force = false) {
   let seen = false;
   try { seen = !!localStorage.getItem(WELCOME_KEY); } catch { /* private mode */ }
-  if (seen && !force) return;
+  // A shared link goes straight to its content
+  const deepLink = ['q', 'paper', 'mode'].some(k => new URLSearchParams(location.search).has(k));
+  if ((seen || deepLink) && !force) return;
   document.getElementById('welcome').hidden = false;
   document.getElementById('universe-hint').hidden = true;
 }

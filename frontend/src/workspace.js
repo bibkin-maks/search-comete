@@ -15,7 +15,7 @@ import {
 } from './galaxy.js';
 import { showDetail } from './panel.js';
 import { compareFacts } from './graph.js';
-import { grow, prune, clearTree, restoreTree, onTreeChange, treeNodes, treeChildren, treeHas, treeNode } from './tree.js';
+import { grow, autoGrow as treeAutoGrow, prune, clearTree, restoreTree, onTreeChange, treeNodes, treeChildren, treeHas, treeNode } from './tree.js';
 import { explainPair, loadLLM, llmInfo } from './llm.js';
 import { icon } from './icons.js';
 
@@ -240,7 +240,11 @@ function _renderPinned() {
       </div>`;
   }).join('');
 
-  body.innerHTML = hint + rows + (ropes.length ? `<div class="section-head"><span class="eyebrow">Ropes</span></div>${ropeRows}` : '');
+  const exportBar = `<div class="section-head"><span class="eyebrow">${pins.size} pinned</span>
+    <span style="display:flex;gap:4px"><button class="btn ghost" id="export-bib" title="Download as BibTeX">${icon.download} .bib</button><button class="btn ghost" id="export-md" title="Download as a Markdown reading list">${icon.download} .md</button></span></div>`;
+  body.innerHTML = exportBar + hint + rows + (ropes.length ? `<div class="section-head"><span class="eyebrow">Compared (ropes)</span></div>${ropeRows}` : '');
+  $('export-bib').addEventListener('click', () => _exportPins('bib'));
+  $('export-md').addEventListener('click', () => _exportPins('md'));
 
   $('rope-cancel')?.addEventListener('click', e => { e.preventDefault(); ropeFrom = null; _renderPinned(); });
   body.querySelectorAll('.paper-row').forEach(el => {
@@ -259,6 +263,38 @@ function _renderPinned() {
       openCompare(el.dataset.a, el.dataset.b);
     });
   });
+}
+
+// Reading list download. DOIs come from OpenAlex when we have them.
+async function _exportPins(format) {
+  const list = [...pins.values()];
+  const { getWork, isOpenAlexId } = await import('./live.js');
+  const full = await Promise.all(list.map(p => isOpenAlexId(p.id) ? getWork(p.id).catch(() => p) : p));
+  const papers = list.map((p, i) => ({ ...p, ...full[i], title: p.title }));
+  let text, name, type;
+  if (format === 'bib') {
+    const used = new Set();
+    text = papers.map(p => {
+      const first = (p.authors || 'anon').split(',')[0].trim().split(/\s+/).pop().toLowerCase().replace(/[^a-z]/g, '') || 'anon';
+      let key = `${first}${p.year || ''}`, n = 1;
+      while (used.has(key)) key = `${first}${p.year || ''}${String.fromCharCode(96 + ++n)}`;
+      used.add(key);
+      const fields = [
+        ['title', `{${p.title}}`],
+        ['author', (p.authors || '').replace(/ et al\.$/, ' and others').split(', ').join(' and ')],
+        ['year', p.year], ['journal', p.venue], ['doi', p.doi?.replace('https://doi.org/', '')], ['url', p.doi || p.id],
+      ].filter(([, v]) => v);
+      return `@article{${key},\n${fields.map(([k, v]) => `  ${k} = {${v}}`).join(',\n')}\n}`;
+    }).join('\n\n');
+    name = 'reading-list.bib'; type = 'application/x-bibtex';
+  } else {
+    text = `# Reading list\n\n_From search·comète, ${new Date().toISOString().slice(0, 10)}_\n\n` + papers.map(p =>
+      `- **${p.title}** - ${p.authors || 'Unknown'} (${p.year || 'n.d.'})${p.venue ? `, _${p.venue}_` : ''}. ${p.cite?.toLocaleString?.() ?? 0} citations. ${p.doi || p.id}`).join('\n') + '\n';
+    name = 'reading-list.md'; type = 'text/markdown';
+  }
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([text], { type })), download: name });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
 function _open(id) {
@@ -366,6 +402,25 @@ function _renderFacts(f, a, b) {
 // ── Citation tree ─────────────────────────────────────────────────────────────
 
 /** Grow the tree from `paper`: 'refs' (down, its past) or 'cited' (up, its future). */
+let growSignal = null;
+
+/** Let the tree grow by itself from `paper` (see tree.autoGrow). */
+export async function autoGrow(paper) {
+  if (growSignal) growSignal.stop = true;
+  const signal = growSignal = { stop: false };
+  setTab('web');
+  growing.add(String(paper.id));
+  try {
+    await treeAutoGrow(paper, { signal, onStatus: msg => { if (growSignal === signal) _renderWeb(msg); } });
+    if (!signal.stop) _flashStatus(`Grown to ${treeNodes().length} papers. Expand any of them to keep going.`);
+  } catch (e) {
+    _flashStatus(`Couldn't grow the tree (${e.message})`);
+  }
+  growing.delete(String(paper.id));
+  if (growSignal === signal) growSignal = null;
+  _renderWeb();
+}
+
 export async function traceWeb(paper, direction = 'refs', depth = 1, onStatus) {
   const kind = direction === 'refs' || direction === 'ref' ? 'ref' : 'cite';
   const id = String(paper.id);
@@ -396,7 +451,7 @@ function _renderWeb(progress) {
   const all = treeNodes();
   $('web-count').textContent = all.length || '';
   if (!all.length && !progress) {
-    body.innerHTML = `<div class="empty">${icon.web}Grow a citation tree from any paper.<br><br>
+    body.innerHTML = `<div class="empty">${icon.web}Grow a citation tree from any paper: open it and press <b>✦ Grow tree</b>, and it grows and arranges itself.<br><br>
       <b>↓ References</b> grow down as roots: the work it builds on.<br>
       <b>↑ Cited by</b> grow up as branches: the work built on it.<br><br>
       Height is time. Expand any paper in the tree to keep growing it; the whole tree is kept.</div>`;
@@ -436,7 +491,7 @@ function _renderWeb(progress) {
     <div class="web-source">
       <div class="eyebrow">Citation tree · height is time</div>
       <div class="web-stats" style="margin-top:8px"><span><b>${all.length}</b> papers</span><span><b>${inGalaxy}</b> in galaxy</span><span><b>${roots.length}</b> root${roots.length === 1 ? '' : 's'}</span></div>
-      ${progress || _status ? `<div class="hint" style="margin:10px 0 0">${esc(progress || _status)}</div>` : ''}
+      ${progress || _status ? `<div class="hint" style="margin:10px 0 0">${esc(progress || _status)}${growSignal ? ' <a href="#" id="grow-stop">stop</a>' : ''}</div>` : ''}
       <div style="margin-top:10px;display:flex;gap:6px">
         <button class="btn" id="tree-fold">Fold all</button>
         <button class="btn" id="web-clear">${icon.close} Clear tree</button>
@@ -444,7 +499,8 @@ function _renderWeb(progress) {
     </div>
     ${roots.map(r => row(r, 0)).join('')}`;
 
-  $('web-clear').addEventListener('click', () => { collapsed.clear(); clearTree(); });
+  $('web-clear').addEventListener('click', () => { if (growSignal) growSignal.stop = true; collapsed.clear(); clearTree(); });
+  $('grow-stop')?.addEventListener('click', e => { e.preventDefault(); if (growSignal) growSignal.stop = true; });
   $('tree-fold').addEventListener('click', () => {
     treeNodes().forEach(n => { if (n.parent) collapsed.add(n.id); });
     _renderWeb();

@@ -37,7 +37,7 @@ import { searchLive, scholarUrl, getWork } from './live.js';
 import { USE_BACKEND, API_BASE } from './config.js';
 import { FALLBACK_PAPERS } from './data.js';
 import { initComets, tickComets, raycastComets, updateCorpus as updateCometCorpus, cleanTitle, stopCometTracking } from './comet.js';
-import { initSound, playWarp, playStarClick, playCometAppear, playCometClick } from './sound.js';
+import { initSound, playWarp, playStarClick, playCometAppear, playCometClick, setMuted } from './sound.js';
 import { initWormhole } from './wormhole.js';
 import { initLabels, updateLabels, updateSector, initTimeline } from './hud.js';
 import { initWorkspace, focusField, fieldLabel, closeCompare } from './workspace.js';
@@ -88,7 +88,10 @@ document.getElementById('app').innerHTML = `
       <button data-mode="universe" title="Start empty and grow your own map by searching">My universe <span id="universe-count"></span></button>
     </div>
     <div id="live-pill" class="glass" title="Live search across all of OpenAlex"><span class="es-dot"></span><span id="live-pill-text">OPENALEX</span></div>
+    <button id="home-btn" class="icon-btn" title="Back to the whole galaxy (H)" aria-label="Back to the whole galaxy">${icon.home}</button>
+    <button id="sound-btn" class="icon-btn" title="Sound on/off" aria-label="Sound on/off">${icon.sound}</button>
     <span id="wormhole-slot"></span>
+    <button id="help-btn" class="icon-btn" title="What is this? (?)" aria-label="Help">${icon.help}</button>
     <button id="settings-trigger" class="icon-btn" aria-label="Settings">${icon.settings}</button>
   </div>
 </header>
@@ -97,7 +100,7 @@ document.getElementById('app').innerHTML = `
   <nav class="tabs">
     <button class="tab active" data-tab="fields">${icon.layers} Fields</button>
     <button class="tab" data-tab="pinned">${icon.pin} Pinned <span class="count" id="pin-count"></span></button>
-    <button class="tab" data-tab="web">${icon.web} Web <span class="count" id="web-count"></span></button>
+    <button class="tab" data-tab="web">${icon.web} Tree <span class="count" id="web-count"></span></button>
   </nav>
   <div class="tab-body active" id="tab-fields"><div id="legend"></div><div id="meteor-fact"></div></div>
   <div class="tab-body" id="tab-pinned"></div>
@@ -114,23 +117,23 @@ document.getElementById('app').innerHTML = `
   <div id="detail-venue"></div>
   <div id="detail-links"></div>
   <div id="detail-actions">
-    <button id="pin-btn" class="btn">${icon.pin} Pin</button>
-    <button id="rope-btn" class="btn">${icon.link} Rope to…</button>
+    <button id="pin-btn" class="btn" title="Keep it in your reading list">${icon.pin} Pin</button>
+    <button id="rope-btn" class="btn" title="Tie a rope to another pinned paper to compare them">${icon.link} Compare with…</button>
   </div>
   <div id="rope-menu" class="rope-menu" hidden></div>
+  <div class="detail-field-label">Citation tree</div>
+  <div class="web-controls">
+    <button class="btn gold" id="grow-btn" title="Let the tree grow by itself: references, citing papers, then the most important of those">${icon.sparkle} Grow tree</button>
+    <button class="btn ice" id="trace-refs" title="Add its references below it (the past)">↓ References</button>
+    <button class="btn" id="trace-cited" title="Add the papers citing it above it (the future)">↑ Cited by</button>
+    <div class="seg" id="web-depth" title="How many levels to add at once"><button data-d="1">1</button><button data-d="2" class="on">2</button><button data-d="3">3</button></div>
+  </div>
   <div id="detail-belongs-wrap">
     <div class="detail-field-label">Where it belongs</div>
     <div id="detail-belongs"></div>
   </div>
   <div class="detail-field-label">Abstract</div>
   <div id="detail-abstract"></div>
-  <div id="detail-score-wrap">
-    <div class="detail-field-label">Search relevance</div>
-    <div id="detail-score">
-      <div class="score-bar-wrap"><div class="score-bar" id="score-bar"></div></div>
-      <div class="score-val" id="score-val"></div>
-    </div>
-  </div>
   <div class="detail-field-label">Topics</div>
   <div id="detail-topics"></div>
   <div id="detail-ai">
@@ -138,15 +141,9 @@ document.getElementById('app').innerHTML = `
     <div class="progress" id="ai-progress" hidden><span></span></div>
     <div class="ai-note" id="ai-note"></div>
   </div>
-  <div class="detail-field-label">Citation tree</div>
-  <div class="web-controls">
-    <div class="seg" id="web-depth" title="How many levels deep"><button data-d="1">1</button><button data-d="2" class="on">2</button><button data-d="3">3</button></div>
-    <button class="btn ice" id="trace-refs" title="Grow its references downward (the past)">↓ References</button>
-    <button class="btn" id="trace-cited" title="Grow papers citing it upward (the future)">↑ Cited by</button>
-  </div>
   <div class="detail-field-label">Nearby in the galaxy</div>
   <div id="detail-similar"></div>
-  <div class="detail-field-label">Field</div>
+  <div class="detail-field-label">About this field</div>
   <div id="detail-lore"></div>
   <div id="detail-es-wrap">
     <div class="detail-field-label">Elasticsearch kNN query</div>
@@ -167,6 +164,24 @@ document.getElementById('app').innerHTML = `
   <input id="year-slider" type="range" tabindex="-1" aria-hidden="true" />
 </footer>
 
+<div id="welcome" class="glass" hidden role="dialog" aria-labelledby="welcome-title">
+  <div class="eyebrow" style="color:var(--gold)">Welcome to search·comète</div>
+  <div class="wl-title" id="welcome-title">A map of 54,190 research papers</div>
+  <div class="wl-lead">Every star is a paper. Inside each field, papers about similar things sit close together; bigger stars are cited more. Search it, or reach all 250M+ papers on OpenAlex.</div>
+  <div class="wl-uses">
+    <div><b>Get your bearings</b> in a new field: what's big, what's recent, what sits next to what.</div>
+    <div><b>Grow a citation tree</b> from any paper: what it builds on, and what built on it.</div>
+    <div><b>Compare two papers</b>: tie a rope between them and see what they share.</div>
+    <div><b>Build a reading list</b>: pin papers and export them as BibTeX or Markdown.</div>
+  </div>
+  <div class="wl-start">
+    <button class="btn gold" data-start="search">${icon.search} Search a topic</button>
+    <button class="btn" data-start="field">${icon.layers} Fly into Machine Learning</button>
+    <button class="btn" data-start="universe">${icon.sparkle} Start from an empty sky</button>
+  </div>
+  <div class="wl-keys"><span>Drag to orbit</span><span>Scroll to zoom</span><span>Click a star</span><span><span class="kbd">/</span> search</span><span><span class="kbd">H</span> home</span></div>
+  <button class="icon-btn" id="welcome-close" aria-label="Close">${icon.close}</button>
+</div>
 <div id="universe-hint" class="glass" hidden>
   <div class="eyebrow" style="color:var(--gold)">My universe</div>
   <div class="uh-title">Your universe is empty.</div>
@@ -328,15 +343,17 @@ async function triggerSearch() {
   if (seq !== searchSeq) return;
   if (getMode() === 'universe') addToUniverse(localHits.slice(0, 12));
 
+  results = { q, seq, live: null, liveError: null, loadingLive: liveEnabled };
+  _renderResults();
   if (localHits.length) {
-    _flashLabel(`${localHits.length} PAPERS IN THIS GALAXY`);
     highlightStars(localHits.map(r => r.id));
     // getRemappedPos() returns scene coordinates; r.x/y/z are raw UMAP coords
     const pos = getRemappedPos(localHits[0].id);
     if (pos) flyToCluster(pos);
-    setTimeout(() => { if (seq === searchSeq) showDetail(localHits[0]); }, 600);
+    // Only jump straight into a paper when the query clearly names it
+    const exact = _titleMatch(q, localHits);
+    if (exact) setTimeout(() => { if (seq === searchSeq) showDetail(exact); }, 600);
   } else {
-    _flashLabel(liveEnabled ? 'NOTHING HERE YET · SEARCHING ALL OF SCIENCE…' : 'NO RESULTS FOUND', 2000);
     clearHighlights();
   }
 
@@ -344,29 +361,36 @@ async function triggerSearch() {
   if (liveEnabled) _runLiveSearch(q, seq);
 }
 
-async function _runLiveSearch(q, seq) {
-  liveBox.hidden = false;
-  liveBox.classList.remove('collapsed');
-  document.getElementById('live-collapse').textContent = '–';
-  document.getElementById('live-summary').textContent = 'SEARCHING OPENALEX…';
-  liveList.innerHTML = '';
+let results = null;
 
+// A result whose title is (almost) exactly what was typed
+function _titleMatch(q, papers) {
+  const norm = (t) => String(t || '').toLowerCase().replace(/<[^>]*>/g, '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const nq = norm(q);
+  if (nq.length < 10) return null;
+  return papers.find(p => {
+    const nt = norm(p.title);
+    // the query is the title, or nearly all of it (a subtitle may be missing)
+    return nt === nq || (nt.startsWith(nq) && nq.length / nt.length > 0.85);
+  }) || null;
+}
+
+async function _runLiveSearch(q, seq) {
   let live;
   try {
     live = await searchLive(q);
   } catch (e) {
     if (seq !== searchSeq) return;
     livePill.classList.toggle('limited', !!e.rateLimited);
-    document.getElementById('live-summary').textContent = 'LIVE SEARCH UNAVAILABLE';
-    liveList.innerHTML = `<div class="live-note">${_esc(e.message)}. You can still
-      <a href="https://scholar.google.com/scholar?q=${encodeURIComponent(q)}" target="_blank" rel="noopener noreferrer">search Google Scholar ↗</a>.</div>`;
+    results = { ...results, loadingLive: false, liveError: e };
+    _renderResults();
     return;
   }
   if (seq !== searchSeq) return;
   livePill.classList.remove('limited');
 
-  // Results already in the galaxy light up; the rest become visitor orbs
-  // parked next to the galaxy papers their titles most resemble.
+  // Results already in the galaxy light up; the rest become new stars
+  // parked where they belong (by meaning once the model is loaded)
   const visitors = [];
   const inGalaxy = [];
   live.results.forEach(p => {
@@ -383,39 +407,67 @@ async function _runLiveSearch(q, seq) {
   lastLive = visitors;
   if (inGalaxy.length) highlightStars([...localHits.map(r => r.id), ...inGalaxy]);
 
-  document.getElementById('live-summary').textContent =
-    `${live.total.toLocaleString()} RESULTS ON OPENALEX · ${inGalaxy.length} MAPPED · ${visitors.length} NEW`;
-
-  if (!live.results.length) {
-    liveList.innerHTML = '<div class="live-note">No papers found on OpenAlex either.</div>';
-    return;
+  results = { ...results, loadingLive: false, live, inGalaxy: inGalaxy.length, added: visitors.length };
+  _renderResults();
+  // The exact paper might only be on OpenAlex (e.g. it isn't one of the 54k)
+  if (!document.getElementById('detail-panel').classList.contains('open')) {
+    const exact = _titleMatch(q, live.results);
+    if (exact) {
+      const pos = getRemappedPos(exact.id);
+      if (pos) flyTo(pos);
+      showDetail(exact);
+    }
   }
+}
 
-  liveList.innerHTML = live.results.map((p, i) => {
-    const mapped = hasStar(p.id);
-    const links = [
-      `<a href="${_esc(scholarUrl(p.title))}" target="_blank" rel="noopener noreferrer">Scholar ↗</a>`,
-      p.pdfUrl && /^https?:\/\//.test(p.pdfUrl) && `<a href="${_esc(p.pdfUrl)}" target="_blank" rel="noopener noreferrer">PDF ↗</a>`,
-      p.doi && `<a href="${_esc(p.doi)}" target="_blank" rel="noopener noreferrer">DOI ↗</a>`,
-    ].filter(Boolean).join('');
-    return `
-      <div class="live-item" tabindex="0" data-i="${i}">
-        <div class="live-title">${_esc(p.title)}</div>
-        <div class="live-meta">
-          <span class="live-badge ${mapped ? 'in' : 'new'}">${mapped ? 'IN GALAXY' : 'NEW STAR'}</span>
-          <span>${_esc((p.authors || '').split(',')[0] || 'Unknown')} · ${p.year || '—'} · ${(p.cite || 0).toLocaleString()} cites</span>
-          ${links}
-        </div>
-      </div>`;
-  }).join('');
+function _renderResults() {
+  if (!results) return;
+  const { q, live, liveError, loadingLive } = results;
+  liveBox.hidden = false;
+  liveBox.classList.remove('collapsed');
+  document.getElementById('live-collapse').textContent = '–';
+
+  const row = (p, i, src, badge = '') => `
+    <div class="live-item" tabindex="0" data-src="${src}" data-i="${i}">
+      <div class="live-title">${_esc(cleanTitle(p.title))}</div>
+      <div class="live-meta">
+        ${badge}
+        <span>${_esc((p.authors || '').split(',')[0] || 'Unknown')} · ${p.year || '—'} · ${(p.cite || 0).toLocaleString()} citations</span>
+        ${src === 'live' ? [
+          `<a href="${_esc(scholarUrl(p.title))}" target="_blank" rel="noopener noreferrer">Scholar ↗</a>`,
+          p.pdfUrl && /^https?:\/\//.test(p.pdfUrl) && `<a href="${_esc(p.pdfUrl)}" target="_blank" rel="noopener noreferrer">PDF ↗</a>`,
+        ].filter(Boolean).join('') : ''}
+      </div>
+    </div>`;
+
+  const local = localHits.slice(0, 6);
+  let html = `<div class="res-section"><span>In the galaxy</span><span>${localHits.length ? `${localHits.length} lit up` : 'none'}</span></div>`;
+  html += local.length
+    ? local.map((p, i) => row(p, i, 'local')).join('')
+    : `<div class="live-note">None of the 54,190 mapped papers match${liveEnabled ? ' - see all of science below.' : '. Turn on LIVE to search all of OpenAlex.'}</div>`;
+
+  if (liveEnabled) {
+    html += `<div class="res-section"><span>All of science · OpenAlex</span><span>${live ? `${live.total.toLocaleString()} found` : ''}</span></div>`;
+    if (loadingLive) html += '<div class="live-note">Searching 250M+ papers…</div>';
+    else if (liveError) html += `<div class="live-note">${_esc(liveError.message)}. You can still <a href="https://scholar.google.com/scholar?q=${encodeURIComponent(q)}" target="_blank" rel="noopener noreferrer">search Google Scholar ↗</a>.</div>`;
+    else if (!live.results.length) html += '<div class="live-note">No papers found on OpenAlex either.</div>';
+    else html += live.results.map((p, i) => row(p, i, 'live', hasStar(p.id)
+      ? '<span class="badge in" title="This paper is one of the mapped stars">in galaxy</span>'
+      : '<span class="badge new" title="Added to the map as a new star, next to the papers it is most like">new star</span>')).join('');
+  }
+  liveList.innerHTML = html;
+  document.getElementById('live-summary').textContent = `Results for “${q.length > 34 ? q.slice(0, 33) + '…' : q}”`;
 
   liveList.querySelectorAll('.live-item').forEach(el => {
     const open = (e) => {
       if (e.target.closest('a')) return;
-      const p = live.results[Number(el.dataset.i)];
+      const p = el.dataset.src === 'local' ? localHits[Number(el.dataset.i)] : live.results[Number(el.dataset.i)];
       const pos = getRemappedPos(p.id);
       if (pos) flyTo(pos);
       showDetail(p);
+      // fold the list away so it doesn't cover what you just picked
+      liveBox.classList.add('collapsed');
+      document.getElementById('live-collapse').textContent = '+';
     };
     el.addEventListener('click', open);
     el.addEventListener('keydown', e => { if (e.key === 'Enter') open(e); });
@@ -480,12 +532,54 @@ window.addEventListener('keydown', e => {
   if (e.key === '/' && !typing) {
     e.preventDefault();
     document.getElementById('search-input').focus();
+  } else if ((e.key === 'h' || e.key === 'H') && !typing) {
+    focusField('all');
+  } else if (e.key === '?' && !typing) {
+    _showWelcome(true);
   } else if (e.key === 'Escape') {
     if (document.getElementById('compare').classList.contains('open')) closeCompare();
     else if (document.getElementById('detail-panel').classList.contains('open')) closeDetail();
     else if (typing) document.activeElement.blur();
   }
 });
+
+// ── Welcome, home, sound ──────────────────────────────────────────────────────
+
+const WELCOME_KEY = 'search-comete-welcomed';
+function _showWelcome(force = false) {
+  let seen = false;
+  try { seen = !!localStorage.getItem(WELCOME_KEY); } catch { /* private mode */ }
+  if (seen && !force) return;
+  document.getElementById('welcome').hidden = false;
+  document.getElementById('universe-hint').hidden = true;
+}
+function _closeWelcome() {
+  document.getElementById('welcome').hidden = true;
+  try { localStorage.setItem(WELCOME_KEY, '1'); } catch { /* private mode */ }
+  if (getMode() === 'universe' && !universeSize()) document.getElementById('universe-hint').hidden = false;
+}
+
+function _initChrome() {
+  const welcome = document.getElementById('welcome');
+  document.getElementById('welcome-close').addEventListener('click', _closeWelcome);
+  welcome.querySelectorAll('[data-start]').forEach(b => b.addEventListener('click', () => {
+    _closeWelcome();
+    if (b.dataset.start === 'search') document.getElementById('search-input').focus();
+    if (b.dataset.start === 'field') focusField('ml');
+    if (b.dataset.start === 'universe') setMode('universe');
+  }));
+  document.getElementById('help-btn').addEventListener('click', () => _showWelcome(true));
+  document.getElementById('home-btn').addEventListener('click', () => focusField('all'));
+
+  const SOUND_KEY = 'search-comete-muted';
+  const btn = document.getElementById('sound-btn');
+  let muted = false;
+  try { muted = localStorage.getItem(SOUND_KEY) === '1'; } catch { /* default on */ }
+  const sync = () => { btn.innerHTML = muted ? icon.mute : icon.sound; btn.title = muted ? 'Sound off' : 'Sound on'; setMuted(muted); };
+  btn.addEventListener('click', () => { muted = !muted; try { localStorage.setItem(SOUND_KEY, muted ? '1' : '0'); } catch {} sync(); });
+  sync();
+  _showWelcome();
+}
 
 // ── Galaxy / My universe ──────────────────────────────────────────────────────
 
@@ -496,7 +590,7 @@ function _initModeSwitch() {
     const m = getMode(), n = universeSize();
     sw.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
     document.getElementById('universe-count').textContent = n ? `· ${n}` : '';
-    hint.hidden = !(m === 'universe' && n === 0);
+    hint.hidden = !(m === 'universe' && n === 0) || !document.getElementById('welcome').hidden;
     document.body.classList.toggle('universe-mode', m === 'universe');
   };
   sw.addEventListener('click', e => {
@@ -708,25 +802,39 @@ function initSettings() {
   applySettings();
 }
 
+function _toast(msg, ms = 4000) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(_toast.timer);
+  _toast.timer = setTimeout(() => t.classList.remove('show'), ms);
+}
+
+// Steps quality down if the machine can't keep up (a few slow seconds in a
+// row), and says so. ?quality=high|medium|low pins it and turns this off.
 function initFPSMonitor() {
-  let frameCount = 0;
+  let frameCount = 0, slow = 0;
   let lastTime = performance.now();
   const counter = document.getElementById('fps-counter');
+  const select = document.getElementById('quality-select');
+  const pinned = new URLSearchParams(location.search).get('quality');
+  if (['high', 'medium', 'low'].includes(pinned)) { select.value = pinned; select.dispatchEvent(new Event('change')); }
 
   registerFrameHook(() => {
     frameCount++;
     const now = performance.now();
-    if (now - lastTime >= 1000) {
-      const fps = Math.round((frameCount * 1000) / (now - lastTime));
-      counter.textContent = `FPS: ${fps}`;
-      
-      // Auto-quality adjustment if FPS is consistently low
-      if (fps < 40 && document.getElementById('quality-select').value === 'high') {
-         console.warn('[main] Low performance detected, suggesting quality reduction');
-      }
-
-      frameCount = 0;
-      lastTime = now;
+    if (now - lastTime < 1000) return;
+    const fps = Math.round((frameCount * 1000) / (now - lastTime));
+    counter.textContent = `FPS: ${fps}`;
+    frameCount = 0;
+    lastTime = now;
+    if (pinned || document.hidden) return;
+    slow = fps < 26 ? slow + 1 : 0;
+    if (slow >= 4 && select.value !== 'low') {
+      select.value = select.value === 'high' ? 'medium' : 'low';
+      select.dispatchEvent(new Event('change'));
+      slow = 0;
+      _toast(`Switched to ${select.value} quality to keep things smooth. You can change it in settings.`);
     }
   });
 }
@@ -774,6 +882,7 @@ loadStars().then(async stars => {
   initWorkspace(stars);
   initUniverse();
   _initModeSwitch();
+  _initChrome();
   initTimeline(stars);
   initLabels(stars, fieldLabel, id => focusField(id));
   _syncViewShift();

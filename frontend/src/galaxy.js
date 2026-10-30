@@ -782,6 +782,11 @@ export function setWebLinks(links) {
   webLinks?.set(links.map(l => ({ ...l, color: _rgb(l.color ?? 0x9fb4ff) })));
 }
 
+/** Same links, new end points (the tree arranging itself). */
+export function moveWebLinks(links) {
+  webLinks?.move(links.map(l => ({ ...l, color: _rgb(l.color ?? 0x9fb4ff) })));
+}
+
 /** Ropes tied between pinned papers. */
 export function setRopes(links) {
   ropeLinks?.set(links.map(l => ({ ...l, color: _rgb(l.color ?? 0xffc857), strength: l.strength ?? 1.6 })));

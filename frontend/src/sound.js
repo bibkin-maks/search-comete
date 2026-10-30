@@ -20,6 +20,17 @@ export let SOUND_ENABLED = true; // flip to false to silence everything
 
 export function setSoundEnabled(v) { SOUND_ENABLED = v; }
 
+/** Mute/unmute everything, including the ambient pad that's already playing. */
+export function setMuted(muted) {
+  if (muted) {
+    if (_ambientRunning) { _ambientRunning = false; _stopAmbient(); }
+    SOUND_ENABLED = false;
+  } else {
+    SOUND_ENABLED = true;
+    if (_ctx) setAmbient(true);
+  }
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 let _ctx = null;
 let _masterGain = null;

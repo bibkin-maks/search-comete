@@ -9,16 +9,24 @@
  */
 
 import { flyTo, getRemappedPos, setSelected, nearestStars, hasStar } from './galaxy.js';
-import { getLore } from './search.js';
 import { getWork, isOpenAlexId, scholarUrl } from './live.js';
 import { USE_BACKEND } from './config.js';
-import { isPaperPinned, togglePin, getPins, startRope, tieRope, traceWeb, fieldLabel } from './workspace.js';
+import { isPaperPinned, togglePin, getPins, startRope, tieRope, traceWeb, autoGrow, fieldLabel } from './workspace.js';
 import { loadMeaning, meaningReady, relatedTopics, belonging } from './meaning.js';
 import { icon } from './icons.js';
 
 let _byId = new Map();
+let _fieldFacts = {};
 export function setCorpus(stars) {
   _byId = new Map(stars.map(s => [String(s.id), s]));
+  // Per-field facts for the "About this field" section
+  const by = {};
+  stars.forEach(s => { (by[s.cluster] ||= []).push(s); });
+  _fieldFacts = Object.fromEntries(Object.entries(by).map(([c, list]) => {
+    const years = list.map(s => Number(s.year)).filter(y => y > 0).sort((a, b) => a - b);
+    const top = [...list].sort((a, b) => (b.cite || 0) - (a.cite || 0)).slice(0, 3);
+    return [c, { count: list.length, median: years[Math.floor(years.length / 2)], top }];
+  }));
 }
 
 let _current = null;   // paper currently shown, guards async updates
@@ -48,17 +56,7 @@ export function showDetail(paper) {
   $('detail-authors').textContent = paper.authors || '-';
   $('detail-year').textContent    = [paper.year, `${(Number(paper.cite) || 0).toLocaleString()} citations`].filter(Boolean).join('  ·  ');
   $('detail-venue').textContent   = paper.venue || '';
-  getLore(paper.cluster).then(txt => { if (_current === paper) $('detail-lore').textContent = txt; });
-
-  // Relevance only means something when we came from a search
-  const scoreWrap = $('detail-score-wrap');
-  scoreWrap.style.display = typeof paper.score === 'number' ? '' : 'none';
-  if (typeof paper.score === 'number') {
-    $('score-bar').style.width = Math.round(paper.score * 100) + '%';
-    $('score-bar').style.background = css;
-    $('score-val').textContent = paper.score.toFixed(3);
-    $('score-val').style.color = css;
-  }
+  _renderField(paper);
 
   _renderActions(paper);
   _renderLinks(paper);
@@ -70,8 +68,9 @@ export function showDetail(paper) {
 
   $('trace-refs').onclick  = () => traceWeb(paper, 'refs', _depth);
   $('trace-cited').onclick = () => traceWeb(paper, 'cited', _depth);
+  $('grow-btn').onclick    = () => autoGrow(paper);
   const canTrace = isOpenAlexId(paper.id);
-  $('trace-refs').disabled = $('trace-cited').disabled = !canTrace;
+  $('trace-refs').disabled = $('trace-cited').disabled = $('grow-btn').disabled = !canTrace;
 
   $('detail-es-wrap').style.display = USE_BACKEND ? '' : 'none';
   $('detail-panel').classList.add('open');
@@ -301,6 +300,24 @@ function _loadSimilar(paper) {
       if (pos) flyTo(pos);
     });
   });
+}
+
+// ── About this field (facts from the galaxy, not flavour text) ────────────────
+
+function _renderField(paper) {
+  const box = $('detail-lore');
+  const f = _fieldFacts[paper.cluster];
+  if (!f) { box.textContent = 'This paper isn\'t part of one of the 15 mapped fields.'; return; }
+  box.innerHTML = `
+    <div>${_escHtml(fieldLabel(paper.cluster))}: <b>${f.count.toLocaleString()}</b> papers in the galaxy${f.median ? `, half of them published after <b>${f.median}</b>` : ''}. Most cited here:</div>
+    ${f.top.map(t => `<div class="similar-item" data-id="${_escAttr(String(t.id))}"><div class="similar-title">${_escHtml(t.title)}</div><div class="similar-meta">${t.year || ''} · ${(t.cite || 0).toLocaleString()} citations</div></div>`).join('')}`;
+  box.querySelectorAll('.similar-item').forEach(el => el.addEventListener('click', () => {
+    const found = _byId.get(el.dataset.id);
+    if (!found) return;
+    showDetail(found);
+    const pos = getRemappedPos(found.id);
+    if (pos) flyTo(pos);
+  }));
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

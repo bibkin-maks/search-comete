@@ -17,7 +17,7 @@ const FRONTIER_CAP = [30, 20];       // papers expanded from level 1 / level 2
 /**
  * @returns {{ root, nodes: Map<id,{paper,depth,votes}>, edges: Array<{from,to,depth}>, direction }}
  */
-export async function traceReferences(rootId, depth = 2, onProgress) {
+export async function traceReferences(rootId, depth = 2, onProgress, { limit } = {}) {
   onProgress?.('Reading the paper…');
   const root = await getWork(rootId);
   const nodes = new Map([[root.id, { paper: root, depth: 0, votes: 0 }]]);
@@ -41,7 +41,9 @@ export async function traceReferences(rootId, depth = 2, onProgress) {
     if (!picked.length) break;
 
     onProgress?.(`Level ${d}: ${picked.length} papers`);
-    const papers = await getWorks(picked.map(([id]) => id));
+    let papers = await getWorks(picked.map(([id]) => id));
+    // With a limit, keep the most shared, then most cited
+    if (limit) papers = papers.sort((a, b) => (votes.get(b.id)?.count ?? 0) - (votes.get(a.id)?.count ?? 0) || b.cite - a.cite).slice(0, limit);
     papers.forEach(p => {
       const v = votes.get(p.id);
       if (!v) return;
@@ -56,14 +58,14 @@ export async function traceReferences(rootId, depth = 2, onProgress) {
 }
 
 /** Who built on this paper: most cited citing papers, then theirs. */
-export async function traceCitedBy(rootId, depth = 2, onProgress) {
+export async function traceCitedBy(rootId, depth = 2, onProgress, { limit } = {}) {
   onProgress?.('Reading the paper…');
   const root = await getWork(rootId);
   const nodes = new Map([[root.id, { paper: root, depth: 0, votes: 0 }]]);
   const edges = [];
 
   onProgress?.('Level 1: who cites it');
-  const first = await getCitingWorks(root.id, 30);
+  const first = await getCitingWorks(root.id, limit || 30);
   first.results.forEach(p => {
     nodes.set(p.id, { paper: p, depth: 1, votes: 1 });
     edges.push({ from: root.id, to: p.id, depth: 1 });

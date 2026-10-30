@@ -16,8 +16,8 @@ import * as THREE from 'three';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const MIN_INTERVAL_MS = 1 * 60 * 1000;   // 2 min
-const MAX_INTERVAL_MS = 2 * 60 * 1000;   // 4 min
+const MIN_INTERVAL_MS = 4 * 60 * 1000;   // comets are a treat, not a notification stream
+const MAX_INTERVAL_MS = 7 * 60 * 1000;
 const COMET_DURATION  = 35.0;            // seconds to cross the scene
 const TAIL_POINTS     = 120;             // world-space positions stored in history
 const TAIL_DRAW       = 80;             // how many to actually render each frame

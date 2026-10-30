@@ -212,6 +212,42 @@ export class LinkLayer {
     this.beadMat.uniforms.uYear.value = year;
   }
 
+  /**
+   * Move existing links to new end points without rebuilding buffers (for
+   * the self-arranging tree, every frame). Falls back to set() when the
+   * number of links changed.
+   */
+  move(links) {
+    if (!this.lines || links.length * SEGMENTS * 2 !== this.lines.geometry.attributes.position.count) return this.set(links);
+    const pos = this.lines.geometry.attributes.position.array;
+    const bs = this.beads.geometry.attributes.aStart.array;
+    const bc = this.beads.geometry.attributes.aCtrl.array;
+    const be = this.beads.geometry.attributes.aEnd.array;
+    const a = new THREE.Vector3(), b = new THREE.Vector3();
+    links.forEach((link, li) => {
+      a.set(link.from.x, link.from.y, link.from.z);
+      b.set(link.to.x, link.to.y, link.to.z);
+      const c = _ctrlPoint(a, b);
+      for (let s = 0; s < SEGMENTS; s++) {
+        for (let e = 0; e < 2; e++) {
+          const t = (s + e) / SEGMENTS, u = 1 - t;
+          const v = ((li * SEGMENTS + s) * 2 + e) * 3;
+          pos[v]   = u*u*a.x + 2*u*t*c.x + t*t*b.x;
+          pos[v+1] = u*u*a.y + 2*u*t*c.y + t*t*b.y;
+          pos[v+2] = u*u*a.z + 2*u*t*c.z + t*t*b.z;
+        }
+      }
+      for (let k = 0; k < this.beadsPerLink; k++) {
+        const bi = (li * this.beadsPerLink + k) * 3;
+        bs[bi] = a.x; bs[bi+1] = a.y; bs[bi+2] = a.z;
+        bc[bi] = c.x; bc[bi+1] = c.y; bc[bi+2] = c.z;
+        be[bi] = b.x; be[bi+1] = b.y; be[bi+2] = b.z;
+      }
+    });
+    this.lines.geometry.attributes.position.needsUpdate = true;
+    ['aStart', 'aCtrl', 'aEnd'].forEach(k => { this.beads.geometry.attributes[k].needsUpdate = true; });
+  }
+
   clear() {
     [this.lines, this.beads].forEach(o => {
       if (!o) return;

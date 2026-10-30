@@ -63,7 +63,7 @@ function _injectStyles() {
     #wormhole-btn {
       position: fixed;
       top: 18px;
-      right: 160px;
+      right: 218px;
       z-index: 15;
       width: 36px;
       height: 36px;

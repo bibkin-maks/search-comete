@@ -59,6 +59,7 @@ let composer;
 let lensPass;
 let bloomPass;
 let active = false;
+let bloomEnabled = true;
 
 export function initPostProcessing(renderer, scene, camera) {
     // Enable ACES Filmic Tonemapping for better HDR handling
@@ -66,24 +67,37 @@ export function initPostProcessing(renderer, scene, camera) {
     renderer.toneMappingExposure = 1.2;
 
     composer = new EffectComposer(renderer);
+    composer.setPixelRatio(renderer.getPixelRatio());
     composer.addPass(new RenderPass(scene, camera));
 
-    // Add UnrealBloomPass for the neon glow
+    // Bloom runs at half resolution - it's a blur, nobody can tell
     bloomPass = new UnrealBloomPass(
-        new THREE.Vector2(window.innerWidth, window.innerHeight),
+        new THREE.Vector2(window.innerWidth / 2, window.innerHeight / 2),
         0.12, // strength
         0.5,  // radius
         0.35  // threshold
     );
+    bloomPass.enabled = bloomEnabled;
     composer.addPass(bloomPass);
+    bloomPass.setSize(window.innerWidth / 2, window.innerHeight / 2); // addPass resets it to full size
 
+    // Always the last pass: it writes the composer output to the screen as-is,
+    // which is the colour pipeline the whole look was tuned against
     lensPass = new ShaderPass(LensDistortionShader);
     composer.addPass(lensPass);
 }
 
-export function resizePostProcessing(width, height) {
-    if (composer) composer.setSize(width, height);
-    if (bloomPass) bloomPass.setSize(width, height);
+export function resizePostProcessing(width, height, pixelRatio) {
+    if (!composer) return;
+    if (pixelRatio) composer.setPixelRatio(pixelRatio);
+    composer.setSize(width, height);
+    if (bloomPass) bloomPass.setSize(width / 2, height / 2);
+}
+
+// 'high' | 'medium' | 'low' - low drops bloom entirely
+export function setPostQuality(quality) {
+    bloomEnabled = quality !== 'low';
+    if (bloomPass) bloomPass.enabled = bloomEnabled;
 }
 
 export function setCrucibleLens(enabled) {

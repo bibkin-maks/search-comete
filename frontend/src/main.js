@@ -1,24 +1,14 @@
 /**
  * search-comete - main.js
- * Entry point. Injects the UI shell then initialises galaxy, search, and panel.
- *
- * Fixes applied:
- *  1. loadStars(): The live API is tried first, but if the returned data has
- *     fewer than 3 distinct clusters we fall through to the static stars.json
- *     and then to FALLBACK_PAPERS. This prevents the galaxy from showing only
- *     ml+bio when the pipeline hasn't indexed all clusters yet.
- *  2. Legend rebuild: deferred until after initGalaxy() resolves so
- *     CLUSTER_COLORS is already populated (it was being read too early).
- *  3. Legend 'all' row click-handler now correctly uses clearHighlights()
- *     before calling filterCluster('all').
+ * Entry point. Injects the UI shell, loads the galaxy data, then wires up the
+ * galaxy, search (local + live OpenAlex), detail panel, comets and sound.
  *
  * Features:
- *  - Time Travel year slider
- *  - Meteor of the Day panel
- *  - PIN AS STAR button in detail panel
- *  - Warp overlay
- *  - Grouped legend with all 15 clusters
- *  - Comets: periodic AI-selected papers fly across the galaxy (click to investigate)
+ *  - Local search over the 54k mapped papers, highlighted in the galaxy
+ *  - Live search across all of OpenAlex; results already in the galaxy light
+ *    up, new ones appear as visitor orbs next to their closest neighbours
+ *  - Shareable URLs (?q=…&paper=W…), "/" to search, Esc to close
+ *  - Time Travel year slider, Meteor of the Day, pinned stars, comets
  */
 
 import {
@@ -28,32 +18,27 @@ import {
   flyTo,
   flyToCluster,
   getRemappedPos,
+  hasStar,
   CLUSTER_COLORS,
   setActiveYear,
   setPivotTarget,
+  setVisitors,
+  clearVisitors,
+  setTheme,
+  getScene,
+  getCamera,
+  getRaycaster,
+  registerFrameHook,
+  getRenderer,
 } from './galaxy.js';
-
-// COMET ADDITION: these four functions need to be added to galaxy.js (see galaxy-comet-patch.md).
-// Imported dynamically so the app still boots if galaxy.js hasn't been patched yet.
-let getScene, getCamera, getRaycaster, registerFrameHook, getRenderer;
-const galaxyModulePromise = import('./galaxy.js').then(mod => {
-  getScene           = mod.getScene;
-  getCamera          = mod.getCamera;
-  getRaycaster       = mod.getRaycaster;
-  registerFrameHook  = mod.registerFrameHook;
-  getRenderer        = mod.getRenderer;
-  return mod;
-});
-import { doSearch, setSearchCorpus } from './search.js';
+import { doSearch, setSearchCorpus, localMatches } from './search.js';
 import { showDetail, closeDetail, setCorpus } from './panel.js';
+import { searchLive, scholarUrl } from './live.js';
+import { USE_BACKEND, API_BASE } from './config.js';
 import { FALLBACK_PAPERS } from './data.js';
-// COMET ADDITION: import the comet module
 import { initComets, tickComets, raycastComets, updateCorpus as updateCometCorpus, cleanTitle, stopCometTracking } from './comet.js';
-// SOUND + WORMHOLE ADDITIONS
 import { initSound, playWarp, playStarClick, playCometAppear, playCometClick } from './sound.js';
 import { initWormhole } from './wormhole.js';
-// ORB ADDITION
-import { initOrbs, updateOrbs } from './orb.js';
 
 // ── Inject UI HTML ────────────────────────────────────────────────────────────
 document.getElementById('app').innerHTML = `
@@ -62,15 +47,23 @@ document.getElementById('app').innerHTML = `
 <div id="hud-top">
   <div>
     <div class="wordmark">search<em>·comète</em></div>
-    <div class="tagline">Semantic search · Elasticsearch ELSER · Vector space exploration</div>
+    <div class="tagline" id="tagline">Every paper is a star · closeness = similar meaning</div>
   </div>
-  <div class="elastic-pill"><div class="es-dot"></div>ELASTIC · kNN</div>
+  <div class="elastic-pill" id="live-pill" title="Live search across all of OpenAlex"><div class="es-dot"></div><span id="live-pill-text">OPENALEX · LIVE</span></div>
 </div>
 
 <div id="search-area">
   <div id="search-wrap">
-    <input id="search-input" type="text" placeholder="Search the universe of ideas…" autocomplete="off" />
-    <button id="search-btn">→</button>
+    <input id="search-input" type="text" placeholder="Search the universe of ideas…  ( / )" autocomplete="off" />
+    <button id="live-toggle" class="on" title="Also search all 250M+ papers on OpenAlex">LIVE</button>
+    <button id="search-btn" aria-label="Search">→</button>
+  </div>
+  <div id="live-results" hidden>
+    <div id="live-head">
+      <span id="live-summary"></span>
+      <button id="live-collapse" aria-label="Hide live results">–</button>
+    </div>
+    <div id="live-list"></div>
   </div>
   <div id="query-chips">
     <button class="chip" data-q="attention mechanisms transformers">attention mechanisms</button>
@@ -108,20 +101,26 @@ document.getElementById('app').innerHTML = `
   <div id="detail-title"></div>
   <div id="detail-authors"></div>
   <div id="detail-year"></div>
+  <div id="detail-venue"></div>
+  <div id="detail-links"></div>
   <div id="detail-actions">
     <button id="pin-btn" class="detail-action-btn">☆ PIN AS STAR</button>
   </div>
   <div class="detail-field-label">Abstract</div>
   <div id="detail-abstract"></div>
-  <div class="detail-field-label">Semantic relevance score</div>
-  <div id="detail-score">
-    <div class="score-bar-wrap"><div class="score-bar" id="score-bar"></div></div>
-    <div class="score-val" id="score-val"></div>
+  <div id="detail-score-wrap">
+    <div class="detail-field-label">Search relevance</div>
+    <div id="detail-score">
+      <div class="score-bar-wrap"><div class="score-bar" id="score-bar"></div></div>
+      <div class="score-val" id="score-val"></div>
+    </div>
   </div>
-  <div class="detail-field-label">Similar papers (kNN neighbours)</div>
+  <div class="detail-field-label">Nearby in the galaxy</div>
   <div id="detail-similar"></div>
-  <div class="detail-field-label">Elasticsearch kNN query</div>
-  <div class="elastic-query-box" id="elastic-query"></div>
+  <div id="detail-es-wrap">
+    <div class="detail-field-label">Elasticsearch kNN query</div>
+    <div class="elastic-query-box" id="elastic-query"></div>
+  </div>
 </div>
 
 <div id="tooltip">
@@ -188,7 +187,7 @@ html, body { width: 100%; height: 100%; background: var(--ink); color: var(--pap
 .wordmark { font-family:var(--display); font-size:18px; font-weight:800; letter-spacing:-0.02em; color:var(--paper); }
 .wordmark em { font-style:normal; color:var(--gold); }
 .tagline { font-family:var(--mono); font-size:9px; letter-spacing:0.18em; color:var(--dimmer); text-transform:uppercase; margin-top:2px; }
-.elastic-pill { margin-left:auto; display:flex; align-items:center; gap:6px; font-family:var(--mono); font-size:9px; letter-spacing:0.1em; color:rgba(245,242,235,0.35); border:0.5px solid rgba(245,242,235,0.1); border-radius:2px; padding:5px 10px; }
+.elastic-pill { margin-left:auto; margin-right:40px; display:flex; align-items:center; gap:6px; font-family:var(--mono); font-size:9px; letter-spacing:0.1em; color:rgba(245,242,235,0.35); border:0.5px solid rgba(245,242,235,0.1); border-radius:2px; padding:5px 10px; }
 .es-dot { width:5px; height:5px; border-radius:50%; background:var(--glow-bio); animation:breathe 3s ease-in-out infinite; }
 @keyframes breathe { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
@@ -311,6 +310,7 @@ html, body { width: 100%; height: 100%; background: var(--ink); color: var(--pap
   cursor: pointer;
   border-radius: 2px;
   transition: background 0.15s, border-color 0.15s;
+}
 .detail-action-btn:hover {
   background: rgba(201,168,76,0.08);
   border-color: rgba(201,168,76,0.35);
@@ -355,6 +355,54 @@ html, body { width: 100%; height: 100%; background: var(--ink); color: var(--pap
 .switch-label { font-family:var(--mono); font-size:10px; color:var(--paper); }
 #fps-counter { font-family:var(--mono); font-size:9px; color:rgba(245,242,235,0.3); }
 
+/* Live search */
+#search-input { padding-right:112px; }
+#live-toggle { position:absolute; right:56px; top:50%; transform:translateY(-50%); font-family:var(--mono); font-size:9px; letter-spacing:0.14em; padding:4px 8px; border-radius:2px; cursor:pointer; background:transparent; border:0.5px solid rgba(245,242,235,0.18); color:rgba(245,242,235,0.35); transition:all 0.15s; }
+#live-toggle.on { color:var(--gold); border-color:rgba(201,168,76,0.55); background:rgba(201,168,76,0.08); }
+#live-results { margin-top:8px; background:rgba(10,10,18,0.9); border:0.5px solid rgba(245,242,235,0.12); border-radius:2px; backdrop-filter:blur(10px); max-height:min(30vh, 280px); display:flex; flex-direction:column; }
+#live-results[hidden] { display:none; }
+#live-results.collapsed #live-list { display:none; }
+#live-head { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; border-bottom:0.5px solid rgba(245,242,235,0.08); font-family:var(--mono); font-size:9px; letter-spacing:0.12em; color:var(--gold); }
+#live-collapse { background:none; border:none; color:rgba(245,242,235,0.4); font-family:var(--mono); font-size:14px; cursor:pointer; line-height:1; padding:0 4px; }
+#live-list { overflow-y:auto; padding:4px 0; }
+.live-item { padding:7px 12px; cursor:pointer; border-left:2px solid transparent; transition:background 0.15s, border-color 0.15s; }
+.live-item:hover, .live-item:focus-visible { background:rgba(245,242,235,0.04); border-left-color:var(--gold); outline:none; }
+.live-title { font-family:var(--serif); font-size:13px; line-height:1.35; color:var(--paper); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.live-meta { font-family:var(--mono); font-size:9px; letter-spacing:0.05em; color:rgba(245,242,235,0.38); margin-top:3px; display:flex; flex-wrap:wrap; gap:4px 10px; align-items:center; }
+.live-badge { font-size:8px; letter-spacing:0.12em; padding:1px 5px; border-radius:1px; border:0.5px solid currentColor; }
+.live-badge.in { color:#3dd9a4; }
+.live-badge.new { color:var(--gold); }
+.live-meta a { color:rgba(245,242,235,0.55); text-decoration:none; border-bottom:0.5px dotted rgba(245,242,235,0.3); }
+.live-meta a:hover { color:var(--gold); }
+.live-note { padding:10px 12px; font-family:var(--mono); font-size:10px; line-height:1.6; color:rgba(245,242,235,0.45); }
+.live-note a { color:var(--gold); }
+#live-pill.off .es-dot { background:rgba(245,242,235,0.25); animation:none; }
+#live-pill.limited .es-dot { background:#f9c74f; animation:none; }
+
+#detail-panel.open ~ #settings-trigger, #detail-panel.open ~ #settings-panel { display:none; }
+
+/* Detail extras */
+#detail-venue { font-family:var(--mono); font-size:9px; letter-spacing:0.06em; color:rgba(245,242,235,0.35); margin-top:4px; }
+#detail-venue:empty { display:none; }
+#detail-links { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+.detail-link { font-family:var(--mono); font-size:9px; letter-spacing:0.1em; text-transform:uppercase; color:var(--paper); text-decoration:none; padding:5px 9px; border:0.5px solid rgba(245,242,235,0.15); border-radius:2px; transition:border-color 0.15s, color 0.15s; }
+.detail-link:hover { border-color:var(--gold); color:var(--gold); }
+.detail-empty { font-family:var(--mono); font-size:9px; color:rgba(245,242,235,0.3); padding:4px 0; }
+
+@media (max-width: 720px) {
+  #time-travel, #meteor-fact, #instructions, #star-count, .tagline, .elastic-pill { display:none; }
+  #hud-top { padding:16px; }
+  body #wormhole-btn { right:56px; top:12px; }
+  #search-area { top:58px; }
+  .chip:nth-child(n+4) { display:none; }
+  /* Legend becomes one scrollable row along the bottom */
+  #legend { left:0; right:0; bottom:12px; flex-direction:row; gap:14px; overflow-x:auto; padding:0 16px 4px; scrollbar-width:none; }
+  #legend::-webkit-scrollbar { display:none; }
+  .legend-group-header { display:none; }
+  .legend-row { white-space:nowrap; flex-shrink:0; }
+  #detail-panel { width:100%; }
+}
+
 /* High Contrast mode */
 body.high-contrast .wordmark, body.high-contrast #detail-title { color:#fff !important; text-shadow: 0 0 10px rgba(255,255,255,0.5); }
 body.high-contrast #canvas { filter: saturate(1.5) contrast(1.2); }
@@ -388,79 +436,203 @@ document.getElementById('legend').addEventListener('click', e => {
   });
 });
 
+// ── Search (local galaxy + live OpenAlex) ─────────────────────────────────────
+
+const LIVE_KEY = 'search-comete-live';
+let liveEnabled = (() => { try { return localStorage.getItem(LIVE_KEY) !== '0'; } catch { return true; } })();
+let searchSeq = 0;          // ignore results from searches that were superseded
+let localHits = [];
+
+const liveToggle = document.getElementById('live-toggle');
+const liveBox    = document.getElementById('live-results');
+const liveList   = document.getElementById('live-list');
+const livePill   = document.getElementById('live-pill');
+
+function _syncLiveToggle() {
+  liveToggle.classList.toggle('on', liveEnabled);
+  liveToggle.setAttribute('aria-pressed', String(liveEnabled));
+  livePill.classList.toggle('off', !liveEnabled);
+  document.getElementById('live-pill-text').textContent = liveEnabled ? 'OPENALEX · LIVE' : 'OFFLINE INDEX';
+}
+_syncLiveToggle();
+
+liveToggle.addEventListener('click', () => {
+  liveEnabled = !liveEnabled;
+  try { localStorage.setItem(LIVE_KEY, liveEnabled ? '1' : '0'); } catch { /* private mode */ }
+  _syncLiveToggle();
+  if (!liveEnabled) { liveBox.hidden = true; clearVisitors(); }
+});
+
+document.getElementById('live-collapse').addEventListener('click', () => {
+  liveBox.classList.toggle('collapsed');
+  document.getElementById('live-collapse').textContent = liveBox.classList.contains('collapsed') ? '+' : '–';
+});
+
+function _flashLabel(text, ms = 2500) {
+  const label = document.getElementById('results-label');
+  label.textContent = text;
+  label.classList.add('show');
+  clearTimeout(_flashLabel.timer);
+  _flashLabel.timer = setTimeout(() => label.classList.remove('show'), ms);
+}
+
 async function triggerSearch() {
   const q = document.getElementById('search-input').value.trim();
+  const seq = ++searchSeq;
+  _setUrlParam('q', q || null);
+
   if (!q) {
     clearHighlights();
+    clearVisitors();
+    liveBox.hidden = true;
     document.getElementById('results-label').classList.remove('show');
     return;
   }
-  const results = await doSearch(q);
-  if (!results.length) {
-    const label = document.getElementById('results-label');
-    label.textContent = 'NO RESULTS FOUND';
-    label.classList.add('show');
-    setTimeout(() => label.classList.remove('show'), 2000);
+
+  // 1. Instant: search the galaxy itself
+  localHits = await doSearch(q);
+  if (seq !== searchSeq) return;
+
+  if (localHits.length) {
+    _flashLabel(`${localHits.length} PAPERS IN THIS GALAXY`);
+    highlightStars(localHits.map(r => r.id));
+    // getRemappedPos() returns scene coordinates; r.x/y/z are raw UMAP coords
+    const pos = getRemappedPos(localHits[0].id);
+    if (pos) flyToCluster(pos);
+    setTimeout(() => { if (seq === searchSeq) showDetail(localHits[0]); }, 600);
+  } else {
+    _flashLabel(liveEnabled ? 'NOTHING HERE YET · SEARCHING ALL OF SCIENCE…' : 'NO RESULTS FOUND', 2000);
+    clearHighlights();
+  }
+
+  // 2. Live: search all of OpenAlex in the background
+  if (liveEnabled) _runLiveSearch(q, seq);
+}
+
+async function _runLiveSearch(q, seq) {
+  liveBox.hidden = false;
+  liveBox.classList.remove('collapsed');
+  document.getElementById('live-collapse').textContent = '–';
+  document.getElementById('live-summary').textContent = 'SEARCHING OPENALEX…';
+  liveList.innerHTML = '';
+
+  let live;
+  try {
+    live = await searchLive(q);
+  } catch (e) {
+    if (seq !== searchSeq) return;
+    livePill.classList.toggle('limited', !!e.rateLimited);
+    document.getElementById('live-summary').textContent = 'LIVE SEARCH UNAVAILABLE';
+    liveList.innerHTML = `<div class="live-note">${_esc(e.message)}. You can still
+      <a href="https://scholar.google.com/scholar?q=${encodeURIComponent(q)}" target="_blank" rel="noopener noreferrer">search Google Scholar ↗</a>.</div>`;
+    return;
+  }
+  if (seq !== searchSeq) return;
+  livePill.classList.remove('limited');
+
+  // Results already in the galaxy light up; the rest become visitor orbs
+  // parked next to the galaxy papers their titles most resemble.
+  const visitors = [];
+  const inGalaxy = [];
+  live.results.forEach(p => {
+    if (hasStar(p.id)) { inGalaxy.push(p.id); return; }
+    const spot = _placeVisitor(p);
+    if (spot) { p.cluster = p.cluster || spot.cluster; visitors.push({ paper: p, ...spot.pos }); }
+  });
+  setVisitors(visitors);
+  if (inGalaxy.length) highlightStars([...localHits.map(r => r.id), ...inGalaxy]);
+
+  document.getElementById('live-summary').textContent =
+    `${live.total.toLocaleString()} RESULTS ON OPENALEX · ${inGalaxy.length} MAPPED · ${visitors.length} NEW`;
+
+  if (!live.results.length) {
+    liveList.innerHTML = '<div class="live-note">No papers found on OpenAlex either.</div>';
     return;
   }
 
-  const label = document.getElementById('results-label');
-  label.textContent = `${results.length} PAPERS FOUND`;
-  label.classList.add('show');
-  setTimeout(() => label.classList.remove('show'), 2500);
+  liveList.innerHTML = live.results.map((p, i) => {
+    const mapped = hasStar(p.id);
+    const links = [
+      `<a href="${_esc(scholarUrl(p.title))}" target="_blank" rel="noopener noreferrer">Scholar ↗</a>`,
+      p.pdfUrl && /^https?:\/\//.test(p.pdfUrl) && `<a href="${_esc(p.pdfUrl)}" target="_blank" rel="noopener noreferrer">PDF ↗</a>`,
+      p.doi && `<a href="${_esc(p.doi)}" target="_blank" rel="noopener noreferrer">DOI ↗</a>`,
+    ].filter(Boolean).join('');
+    return `
+      <div class="live-item" tabindex="0" data-i="${i}">
+        <div class="live-title">${_esc(p.title)}</div>
+        <div class="live-meta">
+          <span class="live-badge ${mapped ? 'in' : 'new'}">${mapped ? 'IN GALAXY' : 'NEW STAR'}</span>
+          <span>${_esc((p.authors || '').split(',')[0] || 'Unknown')} · ${p.year || '—'} · ${(p.cite || 0).toLocaleString()} cites</span>
+          ${links}
+        </div>
+      </div>`;
+  }).join('');
 
-  // Highlight all matching stars using their scene IDs
-  highlightStars(results.map(r => r.id));
-
-  // Fly to the top result.
-  // IMPORTANT: always use getRemappedPos() - this returns the actual Three.js
-  // scene coordinates after UMAP + _remapStars(). The x/y/z on the result
-  // object are raw UMAP coords which do NOT match scene positions.
-  const top = results[0];
-  const scenePos = getRemappedPos(top.id);
-  if (scenePos) {
-    flyToCluster(scenePos);
-    console.log(`[search] Flying to "${top.title}" at scene pos`, scenePos);
-  } else {
-    // No scene pos - this result isn't in the loaded galaxy data.
-    // Fall back to flying to the centroid of the top result's cluster.
-    console.warn(`[search] No scene pos for id=${top.id}, trying cluster centroid`);
-    const clusterResults = results.filter(r => r.cluster === top.cluster);
-    let sumX = 0, sumY = 0, sumZ = 0, count = 0;
-    clusterResults.forEach(r => {
-      const p = getRemappedPos(r.id);
-      if (p) { sumX += p.x; sumY += p.y; sumZ += p.z; count++; }
-    });
-    if (count > 0) {
-      flyToCluster({ x: sumX/count, y: sumY/count, z: sumZ/count });
-    }
-  }
-
-  setTimeout(() => showDetail(top), 600);
+  liveList.querySelectorAll('.live-item').forEach(el => {
+    const open = (e) => {
+      if (e.target.closest('a')) return;
+      const p = live.results[Number(el.dataset.i)];
+      const pos = getRemappedPos(p.id);
+      if (pos) flyTo(pos);
+      showDetail(p);
+    };
+    el.addEventListener('click', open);
+    el.addEventListener('keydown', e => { if (e.key === 'Enter') open(e); });
+  });
 }
+
+// Place a live paper at the centroid of its closest galaxy matches (+ jitter)
+function _placeVisitor(paper) {
+  const matches = localMatches(`${paper.title} ${paper.topic || ''}`, 6)
+    .filter(m => !paper.cluster || m.cluster === paper.cluster || m.score > 0.5);
+  const pool = matches.length ? matches : [];
+  let x = 0, y = 0, z = 0, n = 0;
+  const votes = {};
+  pool.forEach(m => {
+    const p = getRemappedPos(m.id);
+    if (!p) return;
+    x += p.x; y += p.y; z += p.z; n++;
+    votes[m.cluster] = (votes[m.cluster] || 0) + 1;
+  });
+  if (!n) return null;
+  const jitter = () => (Math.random() - 0.5) * 2.2;
+  const cluster = Object.entries(votes).sort((a, b) => b[1] - a[1])[0][0];
+  return { pos: { x: x/n + jitter(), y: y/n + jitter(), z: z/n + jitter() }, cluster };
+}
+
+function _esc(str) {
+  return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Shareable URLs + keyboard ─────────────────────────────────────────────────
+
+function _setUrlParam(key, value) {
+  const url = new URL(location.href);
+  if (value) url.searchParams.set(key, value); else url.searchParams.delete(key);
+  history.replaceState(null, '', url);
+}
+
+window.addEventListener('detail:opened', e => {
+  const id = String(e.detail.id || '');
+  _setUrlParam('paper', id.startsWith('https://openalex.org/') ? id.split('/').pop() : null);
+});
+window.addEventListener('detail:closed', () => _setUrlParam('paper', null));
+
+window.addEventListener('keydown', e => {
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
+  if (e.key === '/' && !typing) {
+    e.preventDefault();
+    document.getElementById('search-input').focus();
+  } else if (e.key === 'Escape') {
+    if (document.getElementById('detail-panel').classList.contains('open')) closeDetail();
+    else if (typing) document.activeElement.blur();
+  }
+});
 
 // ── Load stars ────────────────────────────────────────────────────────────────
 
-/**
- * FIX: Priority order with cluster-count guard.
- *
- * The problem was: /api/stars returned 200 OK but only had ml+bio papers
- * (partial pipeline run). loadStars() accepted that and never fell through
- * to the full fallback data.
- *
- * Now: if the returned data has fewer than MIN_CLUSTERS distinct clusters,
- * we treat it as insufficient and try the next source.
- */
-const MIN_CLUSTERS = 1; // require at least this many clusters before trusting a source
-
-// FIX: pipeline data uses `cluster_id`; fallback/API data uses `cluster`.
-// Check both so stars.json is never skipped due to wrong field name.
-function _countClusters(stars) {
-  return new Set(stars.map(s => s.cluster || s.cluster_id).filter(Boolean)).size;
-}
-
-// Normalise pipeline field names (cluster_id, pos_x, etc.) to what the
-// frontend expects (cluster, x, y, z) so stars.json works without backend mapping.
+// Normalise field names (cluster_id, pos_x, citations...) to what the
+// frontend uses (cluster, x, y, z, cite).
 function _normaliseStars(stars) {
   return stars.map(s => ({
     ...s,
@@ -473,71 +645,84 @@ function _normaliseStars(stars) {
   }));
 }
 
+// galaxy.json is columnar (see pipeline/compact_stars.py) - expand to objects
+function _expandCompact(d) {
+  const out = new Array(d.n);
+  const k = d.coordScale || 1;
+  for (let i = 0; i < d.n; i++) {
+    const cluster = d.clusters[d.cluster[i]];
+    out[i] = {
+      id:      d.idPrefix + d.id[i],
+      title:   d.title[i].replace(/<[^>]*>/g, ''),   // some titles carry <i>/<sub> markup
+      authors: d.authors[i],
+      year:    d.year[i] || null,
+      cite:    d.cite[i],
+      cluster,
+      color:   d.colors[cluster],
+      x: d.xyz[i*3] / k, y: d.xyz[i*3+1] / k, z: d.xyz[i*3+2] / k,
+    };
+  }
+  return out;
+}
+
+// Download with a progress readout on the loader bar
+async function _fetchJsonWithProgress(url) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(90000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const status = document.getElementById('loader-status');
+  const bar = document.getElementById('loader-bar-fill');
+  if (!res.body) return res.json();
+
+  // Content-Length is the compressed size when gzipped, so treat it as a hint
+  const total = Number(res.headers.get('content-length')) || 0;
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    if (status) status.textContent = `Charting stars… ${(received / 1048576).toFixed(1)} MB`;
+    if (bar && total) bar.style.width = `${Math.min(60, (received / total) * 60)}%`;
+  }
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  chunks.forEach(c => { bytes.set(c, offset); offset += c.length; });
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
 async function loadStars() {
-  console.group('[search-comete] loadStars()');
-
-  // 1. Try the live /api/stars endpoint
-  try {
-    console.log('① Trying /api/stars …');
-    const res = await fetch('/api/stars', { signal: AbortSignal.timeout(10000) });
-    console.log('  /api/stars HTTP', res.status, res.ok ? 'OK' : 'FAIL');
-    if (res.ok) {
-      const data = await res.json();
-      const raw = Array.isArray(data) ? data : data.stars;
-      console.log(`  raw length: ${raw?.length ?? 'null'}`);
-      if (raw && raw.length > 0) {
-        console.log('  sample[0] keys:', Object.keys(raw[0]).join(', '));
-        const stars = _normaliseStars(raw);
-        const nc = _countClusters(stars);
-        console.log(`  clusters found: ${nc} →`, [...new Set(stars.map(s => s.cluster))]);
-        if (nc >= MIN_CLUSTERS) {
-          console.info(`✅ Using API: ${stars.length} stars, ${nc} clusters`);
-          console.groupEnd();
-          return stars;
+  // 1. Live index from the backend, when it's deployed
+  if (USE_BACKEND) {
+    try {
+      const res = await fetch(`${API_BASE}/stars`, { signal: AbortSignal.timeout(10000) });
+      if (res.ok) {
+        const raw = await res.json();
+        if (Array.isArray(raw) && raw.length) {
+          console.info(`[load] Using API: ${raw.length} stars`);
+          return _normaliseStars(raw);
         }
-        console.warn(`  ⚠ only ${nc} cluster(s), need ${MIN_CLUSTERS} - skipping API`);
-      } else {
-        console.warn('  ⚠ empty array from API');
       }
+    } catch (e) {
+      console.warn('[load] /api/stars failed:', e.message);
     }
-  } catch (e) {
-    console.warn('  ✗ /api/stars failed:', e.message);
   }
 
-  // 2. Try static stars.json (pre-built by pipeline)
-  // Vite serves frontend/public/ at /, so this resolves to frontend/public/stars.json
+  // 2. Static galaxy.json built by the pipeline (cached by the browser)
   try {
-    console.log('② Trying /stars.json …');
-    const res = await fetch(`/stars.json?t=${Date.now()}`, { signal: AbortSignal.timeout(5000) });
-    console.log('  /stars.json HTTP', res.status, res.ok ? 'OK' : 'FAIL');
-    if (res.ok) {
-      const data = await res.json();
-      const raw = Array.isArray(data) ? data : data.stars;
-      console.log(`  raw length: ${raw?.length ?? 'null'}, isArray: ${Array.isArray(data)}`);
-      if (raw && raw.length > 0) {
-        console.log('  sample[0] keys:', Object.keys(raw[0]).join(', '));
-        console.log('  sample[0]:', JSON.stringify(raw[0]).slice(0, 200));
-        const stars = _normaliseStars(raw);
-        const nc = _countClusters(stars);
-        console.log(`  clusters found: ${nc} →`, [...new Set(stars.map(s => s.cluster))]);
-        if (nc >= MIN_CLUSTERS) {
-          console.info(`✅ Using stars.json: ${stars.length} stars, ${nc} clusters`);
-          console.groupEnd();
-          return stars;
-        }
-        console.warn(`  ⚠ only ${nc} cluster(s) in stars.json, need ${MIN_CLUSTERS} - falling to bundled`);
-      } else {
-        console.warn('  ⚠ stars.json parsed but array is empty or null');
-        console.log('  raw data type:', typeof data, Array.isArray(data) ? '(array)' : '(object)', 'keys:', data ? Object.keys(data).join(', ') : 'null');
-      }
+    const data = await _fetchJsonWithProgress('/galaxy.json');
+    const stars = data.v === 2 ? _expandCompact(data) : _normaliseStars(data);
+    if (stars.length) {
+      console.info(`[load] Using galaxy.json: ${stars.length} stars`);
+      return stars;
     }
   } catch (e) {
-    console.warn('  ✗ /stars.json failed:', e.message);
+    console.warn('[load] galaxy.json failed:', e.message);
   }
 
-  // 3. Bundled fallback - always has all clusters
-  console.info('③ Using bundled FALLBACK_PAPERS');
-  console.groupEnd();
+  // 3. Bundled fallback
+  console.info('[load] Using bundled FALLBACK_PAPERS');
   return FALLBACK_PAPERS;
 }
 
@@ -583,35 +768,30 @@ function buildMeteorFact(stars) {
   const meteor = document.getElementById('meteor-fact');
   if (!meteor || !stars.length) return;
 
-  const mostCited = [...stars].sort(
-    (a, b) => (b.cite ?? b.citations ?? 0) - (a.cite ?? a.citations ?? 0)
-  )[0];
-
-  const newest = [...stars].sort(
-    (a, b) => (b.year || 0) - (a.year || 0)
-  )[0];
+  let mostCited = stars[0], newest = stars[0];
+  stars.forEach(s => {
+    if ((s.cite ?? 0) > (mostCited.cite ?? 0)) mostCited = s;
+    if ((s.year || 0) > (newest.year || 0)) newest = s;
+  });
 
   const picks = [
-    {
-      title: mostCited.title,
-      meta: `Most cited object in this universe · ${(mostCited.cite ?? mostCited.citations ?? 0).toLocaleString()} citations`
-    },
-    {
-      title: newest.title,
-      meta: `Newest signal detected · ${newest.year || 'Unknown year'}`
-    },
-    {
-      title: stars[Math.floor(Math.random() * stars.length)].title,
-      meta: `Meteor of the day · Random jump target`
-    }
+    { star: mostCited, meta: `Most cited object in this universe · ${(mostCited.cite ?? 0).toLocaleString()} citations` },
+    { star: newest,    meta: `Newest signal detected · ${newest.year || 'Unknown year'}` },
+    { star: stars[Math.floor(Math.random() * stars.length)], meta: 'Meteor of the day · Random jump target' },
   ];
 
   const pick = picks[Math.floor(Math.random() * picks.length)];
   meteor.innerHTML = `
     <div class="meteor-label">METEOR OF THE DAY</div>
-    <div class="meteor-title">${pick.title}</div>
-    <div class="meteor-meta">${pick.meta}</div>
+    <div class="meteor-title">${_esc(cleanTitle(pick.star.title))}</div>
+    <div class="meteor-meta">${_esc(pick.meta)} · click to fly there</div>
   `;
+  meteor.style.cursor = 'pointer';
+  meteor.onclick = () => {
+    const pos = getRemappedPos(pick.star.id);
+    if (pos) flyTo(pos);
+    showDetail(pick.star);
+  };
 }
 
 function _getClusterMeta(id) {
@@ -806,24 +986,26 @@ async function shaderWarmup() {
 loadStars().then(async stars => {
   initSettings();
   initGalaxy(document.getElementById('canvas'), stars);
-  
-  // Wait for dynamic imports to complete
-  await galaxyModulePromise;
-  
-  // Get references for comet and orb systems
-  const scene = getScene?.();
-  const camera = getCamera?.();
-  const renderer = getRenderer?.();
-  
+
+  const scene = getScene();
+  const camera = getCamera();
+
   initFPSMonitor();
   await shaderWarmup();
-  document.getElementById('star-count').textContent = `${stars.length} PAPERS INDEXED`;
+  document.getElementById('galaxy-loader').style.transition = 'opacity 0.8s ease';
+  document.getElementById('galaxy-loader').style.opacity = '0';
+  setTimeout(() => { document.getElementById('galaxy-loader').style.display = 'none'; }, 800);
+  document.getElementById('star-count').textContent = `${stars.length.toLocaleString()} PAPERS MAPPED`;
+  document.getElementById('tagline').textContent =
+    `${stars.length.toLocaleString()} papers · closeness = similar meaning · live search across 250M+ works`;
 
   buildMeteorFact(stars);
 
-  const years = stars.map(s => Number(s.year)).filter(Number.isFinite);
-  const minYear = Math.min(...years);
-  const maxYear = Math.max(...years);
+  let minYear = Infinity, maxYear = -Infinity;
+  stars.forEach(s => {
+    const y = Number(s.year);
+    if (y > 0) { minYear = Math.min(minYear, y); maxYear = Math.max(maxYear, y); }
+  });
 
   const slider = document.getElementById('year-slider');
   const readout = document.getElementById('year-readout');
@@ -854,11 +1036,6 @@ loadStars().then(async stars => {
   // Rebuild legend after initGalaxy so CLUSTER_COLORS is populated
   requestAnimationFrame(() => _buildLegend(stars));
 
-  // ORB ADDITION: initialize orb system
-  if (scene && camera && renderer) {
-    initOrbs(scene, camera, renderer);
-  }
-
   // ── COMET ADDITION: initialise comet system ───────────────────────────────
   const canvas  = document.getElementById('canvas');
 
@@ -866,13 +1043,11 @@ loadStars().then(async stars => {
     initComets(scene, camera, stars, _onCometClick, setPivotTarget);
 
     // Tick comets every frame via galaxy's frame hook
-    registerFrameHook?.(delta => tickComets(delta));
-    // ORB ADDITION: update orbs every frame
-    registerFrameHook?.(() => updateOrbs());
+    registerFrameHook(delta => tickComets(delta));
 
     // Comet click detection - runs after galaxy's own click handler
     canvas.addEventListener('click', () => {
-      const raycaster = getRaycaster?.();
+      const raycaster = getRaycaster();
       if (!raycaster) return;
       const hit = raycastComets(raycaster);
       if (hit) _onCometClick(hit);
@@ -949,12 +1124,37 @@ loadStars().then(async stars => {
   window.addEventListener('comet:clicked',  () => playCometClick());
 
   // Wormhole - pass galaxy renderer so it can flip the canvas bg color
-  import('./galaxy.js').then(mod => {
-    const rend = mod.getRenderer ? mod.getRenderer() : null;
-    initWormhole((newMode) => {
-      console.log(`[wormhole] Switched to ${newMode} mode`);
-    }, rend);
-  });
+  initWormhole((newMode) => setTheme(newMode), getRenderer());
 
   // ── END SOUND + WORMHOLE ADDITIONS ───────────────────────────────────────
+
+  _openFromUrl(stars);
 });
+
+// ?q=… runs a search, ?paper=W… opens that paper (in the galaxy or from OpenAlex)
+async function _openFromUrl(stars) {
+  const params = new URLSearchParams(location.search);
+  const q = params.get('q');
+  const paperId = params.get('paper');
+
+  if (q) {
+    document.getElementById('search-input').value = q;
+    await triggerSearch();
+  }
+  if (paperId && /^W\d+$/.test(paperId)) {
+    const id = `https://openalex.org/${paperId}`;
+    const star = stars.find(s => s.id === id);
+    if (star) {
+      const pos = getRemappedPos(id);
+      if (pos) flyTo(pos);
+      setTimeout(() => showDetail(star), q ? 900 : 0);
+    } else {
+      try {
+        const { getWork } = await import('./live.js');
+        showDetail(await getWork(id));
+      } catch (e) {
+        console.warn('[url] could not open paper', paperId, e.message);
+      }
+    }
+  }
+}

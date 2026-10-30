@@ -1,47 +1,56 @@
 /**
  * search-comete - search.js
  *
- * Search against stars.json data directly (no backend needed).
- * Uses a proper TF-IDF style scorer with title/abstract/cluster weighting.
- * Camera navigation uses getRemappedPos() which returns actual scene coords.
+ * Search over the loaded galaxy, in the browser:
+ *  - inverted index over titles (+ abstracts when present), TF-IDF weighted so
+ *    rare words count more than common ones
+ *  - prefix matching ("transform" finds "transformer") via binary search on a
+ *    sorted term list instead of scanning every term
+ *  - small boosts for whole-phrase title matches and citation count
+ * The FastAPI/Elasticsearch backend is used instead only when USE_BACKEND is on.
  */
 
 import { FALLBACK_PAPERS } from './data.js';
+import { USE_BACKEND, API_BASE } from './config.js';
 
-const API_BASE = '/api';
-// Cache the backend check as a promise so concurrent calls don't fire multiple requests
+let _usingBackend = USE_BACKEND ? null : false;
 let _backendCheckPromise = null;
-let _usingBackend = null;
 
-// All loaded stars (from stars.json or fallback) - set by main.js after load
+// All loaded stars - set by main.js after load
 let _allStars = [];
+const _index = new Map();   // term -> [[docIdx, weight], ...]
+let _sortedTerms = [];
+
 export function setSearchCorpus(stars) {
   _allStars = stars;
   _buildIndex();
 }
 
-// ── AI Lore Caching ───────────────────────────────────────────────────────────
-const LORE_CACHE_KEY = 'search-comete-lore-cache';
-const LORE_FALLBACKS = {
-  ml: "An intricate lattice of synthetic neurons, pulsing with the weight of trillion-parameter optimization.",
-  bio: "A swirling helix of carbon and code, mapping the fundamental blueprints of organic vitality.",
-  phys: "Matter and energy intertwined in a high-energy dance, probing the absolute limits of the measurable.",
-  cs: "Binary structures architectures of logic, where abstract algorithms manifest as digital reality.",
-  math: "Pure geometric truth, untethered from physical constraints, residing in the space of axioms.",
-  default: "A dense cluster of human knowledge, emitting the faint heat of collective intellectual labor."
+// ── AI Lore ───────────────────────────────────────────────────────────────────
+const LORE = {
+  ml:    'A dense neural collective, pulsing with the weight of trillion-parameter optimization. Here, logic is not written, but grown.',
+  cs:    'The digital foundation. Architectures of pure reason where abstract algorithms manifest as the physics of our reality.',
+  math:  'The realm of absolute truth. Geometric symmetries and axiomatic structures that exist independent of time, space, or observer.',
+  phys:  'Where the abstract meets the iron laws of nature. A high-energy dance of particles and fields probing the limits of the measurable.',
+  bio:   'The code of life. Swirling helices of carbon and information, mapping the blueprints of organic vitality.',
+  chem:  'Molecular alchemy. The study of bonds and breaks, where the rearrangement of atoms defines what matter can become.',
+  astro: 'The cosmic scale. Infinite voids and stellar nurseries, tracking the history of the universe through the light of ancient stars.',
+  med:   'The study of the fragile vessel. Clinical insights and interventions aimed at preserving the flicker of consciousness.',
+  econ:  'The flows of value and incentive. Modeling collective behavior in a world of finite resources and infinite desire.',
+  psych: 'The interior landscape. Mapping the architecture of thought, emotion, and the emergent mystery of the self.',
+  neuro: 'Eighty-six billion sparks in the dark. Charting how wet tissue turns electricity into memory, motion and mind.',
+  mat:   'Matter by design. Lattices, alloys and polymers engineered atom by atom until they bend, conduct or heal on command.',
+  eng:   'Theory welded into the world. Bridges, engines and circuits where every equation has to survive contact with reality.',
+  env:   'The living planet as one system. Carbon, water and climate in a slow feedback loop we are only beginning to read.',
+  edu:   'How minds are shaped by other minds. The science of learning, teaching and the institutions that carry knowledge forward.',
 };
+const LORE_DEFAULT = 'A dense cluster of human knowledge, emitting the faint heat of collective intellectual labor.';
 
-// ── Inverted index built from the full corpus ────────────────────────────────
-// Maps lowercase token → array of { id, score } sorted by score desc
-const _index = {};
-
-function _tokenise(text) {
-  return (text || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, ' ')
-    .split(/\s+/)
-    .filter(t => t.length > 1 && !STOPWORDS.has(t));
+export async function getLore(clusterId) {
+  return LORE[(clusterId || '').toLowerCase()] || LORE_DEFAULT;
 }
+
+// ── Index ─────────────────────────────────────────────────────────────────────
 
 const STOPWORDS = new Set([
   'a','an','the','and','or','of','in','to','for','is','are','was','were',
@@ -49,32 +58,60 @@ const STOPWORDS = new Set([
   'by','from','as','this','that','it','its','on','not','but','we','our',
   'their','they','can','also','using','based','paper','study','show',
   'propose','present','method','approach','model','result','novel','new',
+  'via','into','than','how','what','why','when','vs',
 ]);
 
+function _tokenise(text) {
+  return (text || '')
+    .toLowerCase()
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/[\s-]+/)
+    .filter(t => t.length > 1 && !STOPWORDS.has(t));
+}
+
 function _buildIndex() {
-  Object.keys(_index).forEach(k => delete _index[k]);
-  _allStars.forEach(star => {
-    const titleTokens   = _tokenise(star.title);
-    const abstractTokens = _tokenise(star.abstract || '');
-    const clusterTokens = _tokenise(star.cluster || '');
-
-    const termScores = {};
-    titleTokens.forEach(t   => { termScores[t] = (termScores[t] || 0) + 3.0; });
-    abstractTokens.forEach(t => { termScores[t] = (termScores[t] || 0) + 0.5; });
-    clusterTokens.forEach(t  => { termScores[t] = (termScores[t] || 0) + 1.0; });
-
-    Object.entries(termScores).forEach(([term, score]) => {
-      if (!_index[term]) _index[term] = [];
-      _index[term].push({ id: String(star.id), score });
+  _index.clear();
+  const t0 = performance.now();
+  _allStars.forEach((star, doc) => {
+    const termScores = new Map();
+    _tokenise(star.title).forEach(t => termScores.set(t, (termScores.get(t) || 0) + 3));
+    _tokenise(star.abstract).forEach(t => termScores.set(t, (termScores.get(t) || 0) + 0.5));
+    termScores.forEach((score, term) => {
+      let postings = _index.get(term);
+      if (!postings) _index.set(term, postings = []);
+      postings.push([doc, score]);
     });
   });
-  console.log(`[search] Index built - ${Object.keys(_index).length} terms, ${_allStars.length} documents`);
+  // Fold IDF into the weights once, so queries are just sums
+  const N = _allStars.length || 1;
+  _index.forEach(postings => {
+    const idf = Math.log(1 + N / postings.length);
+    postings.forEach(p => { p[1] *= idf; });
+  });
+  _sortedTerms = [..._index.keys()].sort();
+  console.log(`[search] Index built - ${_index.size} terms, ${N} documents in ${Math.round(performance.now() - t0)}ms`);
+}
+
+// Terms that start with `prefix` (excluding the exact term), capped
+function _prefixTerms(prefix, cap = 40) {
+  let lo = 0, hi = _sortedTerms.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (_sortedTerms[mid] < prefix) lo = mid + 1; else hi = mid;
+  }
+  const out = [];
+  for (let i = lo; i < _sortedTerms.length && out.length < cap; i++) {
+    const term = _sortedTerms[i];
+    if (!term.startsWith(prefix)) break;
+    if (term !== prefix) out.push(term);
+  }
+  return out;
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export async function doSearch(query) {
-  // Try backend first - use promise cache so concurrent calls don't fire multiple health checks
   if (_usingBackend === null) {
     if (!_backendCheckPromise) _backendCheckPromise = _checkBackend();
     _usingBackend = await _backendCheckPromise;
@@ -86,10 +123,63 @@ export async function doSearch(query) {
       _usingBackend = false;
     }
   }
-  return _localSearch(query);
+  return localSearch(query);
 }
 
-// ── Remote search (FastAPI → Elasticsearch) ──────────────────────────────────
+/** Galaxy stars most related to a piece of text (used to place live results). */
+export function localMatches(text, k = 6) {
+  return localSearch(text, k);
+}
+
+export function localSearch(query, limit = 30) {
+  const corpus = _allStars.length ? _allStars : FALLBACK_PAPERS;
+  const tokens = _tokenise(query);
+  if (!tokens.length) return [];
+
+  const scores = new Map();
+  const add = (doc, s) => scores.set(doc, (scores.get(doc) || 0) + s);
+
+  if (_allStars.length) {
+    tokens.forEach(tok => {
+      (_index.get(tok) || []).forEach(([doc, w]) => add(doc, w));
+      if (tok.length >= 3) {
+        _prefixTerms(tok).forEach(term => {
+          const credit = 0.6 * tok.length / term.length;
+          _index.get(term).forEach(([doc, w]) => add(doc, w * credit));
+        });
+      }
+    });
+  } else {
+    corpus.forEach((p, doc) => {
+      tokens.forEach(tok => {
+        if ((p.title || '').toLowerCase().includes(tok))    add(doc, 3);
+        if ((p.abstract || '').toLowerCase().includes(tok)) add(doc, 0.5);
+      });
+    });
+  }
+  if (!scores.size) return [];
+
+  // Reward docs that match more of the query words, whole phrases, and citations
+  const phrase = query.toLowerCase().trim();
+  const ranked = [...scores.entries()].map(([doc, s]) => {
+    const star = corpus[doc];
+    const title = (star.title || '').toLowerCase();
+    const covered = tokens.filter(t => title.includes(t)).length / tokens.length;
+    let score = s * (0.5 + covered);
+    if (tokens.length > 1 && title.includes(phrase)) score *= 1.5;
+    score *= 1 + 0.04 * Math.log10((star.cite ?? 0) + 1);
+    return [star, score];
+  }).sort((a, b) => b[1] - a[1]).slice(0, limit);
+
+  const max = ranked[0][1];
+  return ranked.map(([star, score]) => ({
+    ...star,
+    cite:  star.cite ?? star.citations ?? 0,
+    score: Math.min(0.99, score / max),
+  }));
+}
+
+// ── Remote search (FastAPI → Elasticsearch), only with USE_BACKEND ───────────
 
 async function _remoteSearch(query) {
   const res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}&size=20`, {
@@ -109,102 +199,6 @@ async function _remoteSearch(query) {
 async function _checkBackend() {
   try {
     const res = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(2000) });
-    return res.ok;
+    return res.ok && (await res.json()).status === 'ok';
   } catch { return false; }
-}
-
-// ── AI Lore Generator ─────────────────────────────────────────────────────────
-
-export async function getLore(clusterId) {
-  const cache = JSON.parse(localStorage.getItem(LORE_CACHE_KEY) || '{}');
-  const cid = (clusterId || 'default').toLowerCase();
-  
-  if (cache[cid]) return cache[cid];
-
-  if (_usingBackend === false) return LORE_FALLBACKS[cid] || LORE_FALLBACKS.default;
-
-  try {
-    const res = await fetch(`${API_BASE}/lore?cluster=${encodeURIComponent(cid)}`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    if (!res.ok) throw new Error();
-    const data = await res.json();
-    const lore = data.description || LORE_FALLBACKS[cid] || LORE_FALLBACKS.default;
-    
-    // Cache the result
-    cache[cid] = lore;
-    localStorage.setItem(LORE_CACHE_KEY, JSON.stringify(cache));
-    return lore;
-  } catch (e) {
-    console.warn('[search] Lore API failed, using fallback.');
-    return LORE_FALLBACKS[cid] || LORE_FALLBACKS.default;
-  }
-}
-
-// ── Local TF-IDF search against full corpus ───────────────────────────────────
-
-function _localSearch(query) {
-  const corpus = _allStars.length > 0 ? _allStars : FALLBACK_PAPERS;
-  const tokens = _tokenise(query);
-  if (!tokens.length) return [];
-
-  // Score each document
-  const scores = {};
-
-  // 1. Index lookup (fast path - pre-built inverted index)
-  if (_allStars.length > 0) {
-    tokens.forEach(tok => {
-      // Exact match
-      const exact = _index[tok] || [];
-      exact.forEach(({ id, score }) => {
-        scores[id] = (scores[id] || 0) + score;
-      });
-      // Prefix match for partial terms (e.g. "transform" matches "transformer")
-      Object.keys(_index).forEach(term => {
-        if (term !== tok && (term.startsWith(tok) || tok.startsWith(term))) {
-          const boost = tok.length / Math.max(term.length, tok.length); // partial credit
-          _index[term].forEach(({ id, score }) => {
-            scores[id] = (scores[id] || 0) + score * boost * 0.6;
-          });
-        }
-      });
-    });
-  } else {
-    // Fallback: scan FALLBACK_PAPERS directly
-    corpus.forEach(p => {
-      tokens.forEach(tok => {
-        if ((p.title || '').toLowerCase().includes(tok))    scores[String(p.id)] = (scores[String(p.id)] || 0) + 3;
-        if ((p.abstract || '').toLowerCase().includes(tok)) scores[String(p.id)] = (scores[String(p.id)] || 0) + 0.5;
-      });
-    });
-  }
-
-  // 2. Build star map for fast lookup
-  const starMap = {};
-  corpus.forEach(s => { starMap[String(s.id)] = s; });
-
-  // 3. Sort and normalise scores
-  const maxScore = Math.max(...Object.values(scores), 1);
-  const results = Object.entries(scores)
-    .filter(([, s]) => s > 0)
-    .sort(([, a], [, b]) => b - a)
-    .slice(0, 30)
-    .map(([id, rawScore]) => {
-      const star = starMap[id];
-      if (!star) return null;
-      return {
-        ...star,
-        cite:  star.cite ?? star.citations ?? 0,
-        score: Math.min(0.99, rawScore / maxScore),
-      };
-    })
-    .filter(Boolean);
-
-  if (!results.length) {
-    // Return a small random selection so the galaxy still responds
-    return corpus.slice(0, 5).map(p => ({
-      ...p, cite: p.cite ?? 0, score: 0.1,
-    }));
-  }
-  return results;
 }

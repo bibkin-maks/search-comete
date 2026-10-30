@@ -13,7 +13,10 @@ Fixes applied:
 """
 
 from elasticsearch import AsyncElasticsearch
-from models import SearchResult, StarPoint, SimilarPaper, PaperDetail, LoreResponse
+try:
+    from .models import SearchResult, StarPoint, SimilarPaper, PaperDetail, LoreResponse
+except ImportError:
+    from models import SearchResult, StarPoint, SimilarPaper, PaperDetail, LoreResponse
 
 INDEX = "knowledge_galaxy"
 

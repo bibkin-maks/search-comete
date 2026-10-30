@@ -2,148 +2,86 @@
 
 > Navigate the universe of ideas. Every paper is a star.
 
-A 3D semantic search engine for academic papers. Papers are embedded with Elasticsearch ELSER, reduced to 3D coordinates via UMAP, and rendered as an interactive star galaxy in Three.js. Proximity = semantic similarity.
+A 3D map of 54,190 research papers across 15 fields. Each paper's title and abstract were embedded with `all-MiniLM-L6-v2`, squashed to 3D with UMAP, and drawn as a star in Three.js, so papers that mean similar things sit close together. You can fly around, search the map, or search all of OpenAlex (250M+ works) live and watch new papers appear as visitor stars next to their closest neighbours.
+
+Built at Unihack 2026 (March 13-15).
 
 ---
 
+## Features
+
+- **The galaxy** - 54k papers in one GPU draw call. Star size = citations. Highly cited papers get animated plasma orbs when you zoom in, and the 50 most cited ones are black holes with accretion disks.
+- **Search this galaxy** - instant in-browser TF-IDF search over titles. Hits light up and the camera flies to the best match.
+- **Live search** - the `LIVE` toggle also queries [OpenAlex](https://openalex.org). Results that are already mapped light up; new ones show up as gold-ringed visitor orbs placed near the mapped papers they most resemble.
+- **Paper panel** - real abstract (from OpenAlex), Google Scholar / DOI / PDF / OpenAlex links, and the nearest papers in the map.
+- **Time travel** - year slider hides everything published after the chosen year.
+- **Comets, sounds, light mode (wormhole button), pinned stars, meteor of the day.**
+- **Shareable links** - `?q=protein+folding&paper=W3177318507`. Press `/` to search, `Esc` to close the panel.
+
 ## Quick start
 
-### Option A - Frontend only (no setup needed)
+The site is fully static: no backend needed.
 
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run dev        # http://localhost:5173
+npm run build      # static site in frontend/dist (deploys to Vercel as-is)
 ```
 
-Opens at `http://localhost:5173` with 31 bundled papers. No backend or Elasticsearch required - great for the demo.
+It loads `frontend/public/galaxy.json` (9 MB, ~3 MB gzipped, cached after the first visit). If that's missing it falls back to 31 bundled papers.
 
-### Option B - Full stack with real data
+## Rebuilding the data
 
 ```bash
-# 1. Start Elasticsearch
-docker compose up elasticsearch
-
-# 2. Run the pipeline (test: ~500 papers, ~5 min)
 pip install -r pipeline/requirements.txt
-python -m pipeline.run --limit 20
-
-# 3. Start the backend
-pip install -r backend/requirements.txt
-uvicorn backend.main:app --reload --port 8000
-
-# 4. Start the frontend
-cd frontend && npm install && npm run dev
+python -m pipeline.run --limit 20            # quick test, ~500 papers
+python -m pipeline.run                       # full run, 200 papers/topic
+python -m pipeline.run --skip-index          # without Elasticsearch
 ```
 
-The frontend auto-detects the backend. If it's not running, it falls back to bundled data seamlessly.
+Fetches papers from OpenAlex (or `--use-ss` / `--use-arxiv`), embeds them, runs UMAP, and writes `frontend/public/galaxy.json`. To convert an existing `stars.json` by hand: `python -m pipeline.compact_stars in.json out.json`.
 
----
+## Optional: Elasticsearch backend
+
+The original hackathon version served search from FastAPI + Elasticsearch (BM25 + kNN with RRF). It still works if you want it:
+
+```bash
+cp .env.example .env
+docker compose up elasticsearch
+python -m pipeline.run --limit 20
+pip install -r backend/requirements.txt
+uvicorn backend.main:app --reload --port 8000
+VITE_USE_BACKEND=1 npm run dev --prefix frontend
+```
+
+| Endpoint          | ES feature                            |
+|-------------------|---------------------------------------|
+| `GET /search`     | BM25 `multi_match` + kNN, fused (RRF) |
+| `GET /paper/:id`  | `knn` on the `dense_vector` field     |
+| `GET /stars`      | `match_all` with `search_after`       |
+| `GET /stats`      | `terms` + `avg` + `sum` aggregations  |
 
 ## Project structure
 
 ```
-search-comete/
-├── frontend/
-│   ├── src/
-│   │   ├── main.js        - app entry, UI shell, wires modules
-│   │   ├── galaxy.js      - Three.js scene, orbit, raycasting
-│   │   ├── search.js      - API calls + local fallback search
-│   │   ├── panel.js       - detail panel UI
-│   │   └── data.js        - bundled fallback papers + keyword map
-│   ├── public/
-│   │   └── index.html
-│   ├── package.json
-│   └── vite.config.js
-│
-├── backend/
-│   ├── main.py            - FastAPI routes
-│   ├── search.py          - Elasticsearch query logic
-│   ├── models.py          - Pydantic models
-│   ├── requirements.txt
-│   └── Dockerfile
-│
-├── pipeline/
-│   ├── run.py             - orchestrates all steps
-│   ├── fetch.py           - Semantic Scholar / arXiv APIs
-│   ├── embed.py           - sentence-transformers embeddings
-│   ├── umap_reduce.py     - UMAP 384d → 3d
-│   ├── index.py           - Elasticsearch bulk indexing
-│   └── requirements.txt
-│
-├── docs/
-│   └── architecture.md
-│
-├── docker-compose.yml
-├── .env.example
-├── .gitignore
-└── README.md
+frontend/src/
+  main.js         UI shell, data loading, search flow, URLs
+  galaxy.js       Three.js scene, star field shader, camera, picking
+  orb.js          detailed hero orbs (plasma stars, black holes, visitors)
+  search.js       in-browser search index
+  live.js         OpenAlex live search + abstracts
+  panel.js        paper detail panel
+  comet.js        comets flying across the galaxy
+  postfx.js       bloom + lens effects
+  sound.js, sonification.js, wormhole.js
+backend/          FastAPI + Elasticsearch (optional)
+pipeline/         fetch -> embed -> UMAP -> index -> galaxy.json
 ```
 
----
+## Notes
 
-## How it works
+- OpenAlex is free and needs no key, but each visitor's IP gets a small daily budget (around 100 searches). When it runs out the UI says so and offers a Google Scholar link instead.
+- Google Scholar has no public API, so Scholar is linked, not searched.
 
-1. **Fetch** - `pipeline/fetch.py` pulls papers from [Semantic Scholar](https://api.semanticscholar.org/) (free, no key) or arXiv across 25 topic queries covering ML, biology, physics, CS, and mathematics.
-
-2. **Embed** - `pipeline/embed.py` runs each paper's title + abstract through `all-MiniLM-L6-v2` (sentence-transformers), producing a 384-dimensional meaning vector per paper.
-
-3. **UMAP** - `pipeline/umap_reduce.py` compresses those 384 dimensions down to 3 (x, y, z). Papers that mean similar things end up physically close - the cluster structure emerges automatically from the data.
-
-4. **Index** - `pipeline/index.py` bulk-indexes everything into Elasticsearch with the `dense_vector` field type enabled for kNN search.
-
-5. **Search** - `backend/search.py` runs BM25 text search on title/abstract for keyword queries, and kNN cosine similarity on the embedding field for "similar papers" lookups.
-
-6. **Render** - `frontend/src/galaxy.js` places a Three.js sphere at each paper's (x, y, z) position, sized by citation count, coloured by cluster. You orbit with your mouse, click stars to open the detail panel, and search to highlight matching papers and warp the camera to the result cluster.
-
----
-
-## Elasticsearch API used
-
-| Endpoint          | ES feature                                  |
-|-------------------|---------------------------------------------|
-| `GET /search`     | BM25 `multi_match` with field boosting      |
-| `GET /paper/:id`  | `knn` query on `dense_vector` field         |
-| `GET /stars`      | `match_all` + `_source` filtering           |
-| `GET /stats`      | `terms` + `avg` + `sum` aggregations        |
-
----
-
-## Pipeline options
-
-```bash
-# Quick test (20 papers/topic ≈ 500 total, ~5 min)
-python -m pipeline.run --limit 20
-
-# Full run (200 papers/topic ≈ 5,000 total, ~30 min)
-python -m pipeline.run
-
-# Use arXiv instead of Semantic Scholar
-python -m pipeline.run --use-arxiv
-
-# Skip re-fetching, re-run embed + UMAP + index
-python -m pipeline.run --skip-fetch
-
-# Skip everything except exporting stars.json
-python -m pipeline.run --skip-fetch --skip-embed --skip-umap --skip-index
-```
-
----
-
-## Environment variables
-
-Copy `.env.example` to `.env`:
-
-```bash
-cp .env.example .env
-```
-
-| Variable       | Default                    | Description               |
-|----------------|----------------------------|---------------------------|
-| `ES_HOST`      | `http://localhost:9200`    | Local Elasticsearch URL   |
-| `ES_CLOUD_ID`  | -                          | Elastic Cloud deployment  |
-| `ES_API_KEY`   | -                          | Elastic Cloud API key     |
-
----
-
-Built with [Elasticsearch](https://elastic.co) · [Three.js](https://threejs.org) · [sentence-transformers](https://sbert.net) · [UMAP](https://umap-learn.readthedocs.io) · [FastAPI](https://fastapi.tiangolo.com)
+Built with [Three.js](https://threejs.org) · [OpenAlex](https://openalex.org) · [sentence-transformers](https://sbert.net) · [UMAP](https://umap-learn.readthedocs.io) · [Elasticsearch](https://elastic.co) · [FastAPI](https://fastapi.tiangolo.com)

@@ -11,8 +11,14 @@ from elasticsearch import AsyncElasticsearch
 from typing import Optional
 import os
 
-from models import SearchResponse, PaperDetail, LoreResponse
-import search as es_search
+# Works both as a package (uvicorn backend.main:app from the repo root)
+# and flat (uvicorn main:app inside the Docker image)
+try:
+    from .models import SearchResponse, PaperDetail, LoreResponse
+    from . import search as es_search
+except ImportError:
+    from models import SearchResponse, PaperDetail, LoreResponse
+    import search as es_search
 
 app = FastAPI(title="search-comete API — Noosphere Edition", version="0.2.0")
 

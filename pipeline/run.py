@@ -28,6 +28,7 @@ from elasticsearch import Elasticsearch
 
 from .fetch       import fetch_openalex, fetch_semantic_scholar, fetch_arxiv, deduplicate
 from .embed       import load_model, embed_papers
+from .compact_stars import compact as compact_stars
 from .umap_reduce import run_umap
 from .index       import setup_index, build_docs, bulk_index
 
@@ -369,6 +370,7 @@ PROGRESS_JSON = os.path.join(CACHE_DIR, "progress.json")
 EMBED_NPY     = os.path.join(CACHE_DIR, "embeddings.npy")
 COORDS_NPY    = os.path.join(CACHE_DIR, "coords.npy")
 STARS_JSON    = os.path.join(os.path.dirname(__file__), "stars.json")
+GALAXY_JSON   = os.path.join(os.path.dirname(__file__), "..", "frontend", "public", "galaxy.json")
 
 
 def main():
@@ -502,6 +504,11 @@ def main():
     size_kb = os.path.getsize(STARS_JSON) // 1024
     counts  = Counter(s["cluster"] for s in stars)
     print(f"  Exported {len(stars):,} stars → {STARS_JSON} ({size_kb} KB)")
+
+    # Compact columnar copy the frontend actually loads (~1/3 of the size)
+    with open(GALAXY_JSON, "w", encoding="utf-8") as f:
+        json.dump(compact_stars(stars), f, ensure_ascii=False, separators=(",", ":"))
+    print(f"  Wrote {GALAXY_JSON} ({os.path.getsize(GALAXY_JSON) // 1024} KB)")
     for cid, n in sorted(counts.items()):
         print(f"    {cid:8s}: {n:,}")
 
@@ -526,8 +533,7 @@ def main():
         print("\n[5/5] Skipping Elasticsearch (--skip-index)")
 
     print(f"\n✓ Done - {len(docs):,} papers")
-    print(f"\n  cp pipeline/stars.json frontend/public/stars.json")
-    print(f"  Ctrl+Shift+R in browser")
+    print(f"\n  Frontend data updated: {GALAXY_JSON}")
 
 
 if __name__ == "__main__":

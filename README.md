@@ -133,6 +133,8 @@ backend/          FastAPI + Elasticsearch (optional)
 
 ## Team
 
+<img src="docs/team-logo.gif" alt="Team logo: an ASCII cat inside a spinning propeller" width="140" align="right">
+
 Built at **Unihack 2026** (13–15 March) by Billy H, Maks and George Wei.
 
 The video above was made with [promokit](https://github.com/bibkin-maks/prodkit): the scenario is in `docs/promo-scenario.json`, and the tool filmed the real app frame by frame.

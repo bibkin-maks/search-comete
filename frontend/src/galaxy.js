@@ -1104,7 +1104,9 @@ const clock = new THREE.Clock();
 function _animate() {
   animFrame = requestAnimationFrame(_animate);
 
-  const delta = Math.min(clock.getDelta(), 0.1);
+  // Never step backwards: performance.now() can jump back (e.g. when a video
+  // tool installs a fake clock), and negative steps fling the easing around
+  const delta = Math.max(0, Math.min(clock.getDelta(), 0.1));
   t += delta;
   _frameHooks.forEach(fn => fn(delta));
 
@@ -1265,5 +1267,5 @@ function _clearHover() {
 
 // Dev-only handle for poking the scene from the console / screenshot scripts
 if (import.meta.env.DEV) {
-  window.__galaxy = { orbs: () => heroOrbs, getRemappedPos, flyTo, flyToCluster, filterCluster, highlightStars, clearHighlights, setTheme, nearestStars, setActiveYear };
+  window.__galaxy = { orbs: () => heroOrbs, view: () => ({ ...getView(), camera: camera.position.toArray(), t, calls: renderer.info.render.calls, points: renderer.info.render.points, uTime: starMat.uniforms.uTime.value, uScale: starMat.uniforms.uScale.value }), getRemappedPos, flyTo, flyToCluster, filterCluster, highlightStars, clearHighlights, setTheme, nearestStars, setActiveYear };
 }

@@ -537,9 +537,14 @@ window.addEventListener('keydown', e => {
   } else if (e.key === '?' && !typing) {
     _showWelcome(true);
   } else if (e.key === 'Escape') {
-    if (document.getElementById('compare').classList.contains('open')) closeCompare();
+    // Dismiss the topmost thing: welcome, comparison, paper, results list, then the search box
+    if (!document.getElementById('welcome').hidden) _closeWelcome();
+    else if (document.getElementById('compare').classList.contains('open')) closeCompare();
     else if (document.getElementById('detail-panel').classList.contains('open')) closeDetail();
-    else if (typing) document.activeElement.blur();
+    else if (!liveBox.hidden && !liveBox.classList.contains('collapsed')) {
+      liveBox.classList.add('collapsed');
+      document.getElementById('live-collapse').textContent = '+';
+    } else if (typing) document.activeElement.blur();
   }
 });
 

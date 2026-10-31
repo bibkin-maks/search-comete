@@ -1,0 +1,235 @@
+{
+  "brand": {
+    "name": "search·comète",
+    "tagline": "A 3D map of 54,190 research papers, and live search across all of science"
+  },
+  "look": "cinematic",
+  "music": "epic",
+  "intro": {
+    "overline": "Unihack 2026",
+    "title": [
+      "Every paper",
+      "is a star"
+    ],
+    "lead": "**54,190 research papers**, mapped by meaning. Fly through science."
+  },
+  "scenes": [
+    {
+      "page": "p1",
+      "label": "The galaxy",
+      "shot": "full",
+      "transition": "cut",
+      "title": [
+        "Science as",
+        "a galaxy"
+      ],
+      "lead": "Papers about similar things sit together, and **bigger stars are cited more**.",
+      "chips": [
+        "15 fields",
+        "54,190 papers"
+      ],
+      "steps": [
+        {
+          "do": "highlight",
+          "target": "e15"
+        },
+        {
+          "do": "click",
+          "target": "e27"
+        },
+        {
+          "do": "wait",
+          "seconds": 1.5
+        },
+        {
+          "do": "drag",
+          "target": "e1",
+          "by": [
+            0.45,
+            0.05
+          ],
+          "at": [
+            0.55,
+            0.5
+          ]
+        }
+      ]
+    },
+    {
+      "page": "p1",
+      "label": "Search",
+      "shot": "hero",
+      "transition": "whip",
+      "title": [
+        "Search it",
+        "or everything"
+      ],
+      "lead": "Matches light up in the map, and **250M+ more papers** arrive live from OpenAlex.",
+      "chips": [
+        "Search by meaning",
+        "Live OpenAlex results"
+      ],
+      "steps": [
+        {
+          "do": "type",
+          "target": "e7",
+          "text": "gravitational waves"
+        },
+        {
+          "do": "press",
+          "key": "Enter"
+        },
+        {
+          "do": "wait",
+          "seconds": 3
+        }
+      ]
+    },
+    {
+      "page": "p2",
+      "label": "Citation tree",
+      "shot": "tilt",
+      "transition": "zoomblur",
+      "title": [
+        "Watch it",
+        "grow"
+      ],
+      "lead": "One click grows **what a paper builds on, and what built on it**. Height is time.",
+      "chips": [
+        "References grow down",
+        "Citations grow up"
+      ],
+      "steps": [
+        {
+          "do": "highlight",
+          "target": "e58"
+        },
+        {
+          "do": "click",
+          "target": "e58"
+        },
+        {
+          "do": "wait",
+          "seconds": 3
+        },
+        {
+          "do": "drag",
+          "target": "e37",
+          "by": [
+            -0.4,
+            0
+          ],
+          "at": [
+            0.45,
+            0.5
+          ]
+        },
+        {
+          "do": "wait",
+          "seconds": 2
+        }
+      ]
+    },
+    {
+      "page": "p3",
+      "label": "My universe",
+      "shot": "hero",
+      "transition": "flash",
+      "title": [
+        "Start from",
+        "an empty sky"
+      ],
+      "lead": "Everything you find stays, **placed by meaning** among the papers around it.",
+      "chips": [
+        "Saved in your browser",
+        "A small model, on your device"
+      ],
+      "steps": [
+        {
+          "do": "click",
+          "target": "e98"
+        },
+        {
+          "do": "wait",
+          "seconds": 3
+        },
+        {
+          "do": "press",
+          "key": "Escape"
+        },
+        {
+          "do": "press",
+          "key": "Escape"
+        },
+        {
+          "do": "wheel",
+          "target": "e73",
+          "amount": -3,
+          "at": [
+            0.5,
+            0.5
+          ]
+        },
+        {
+          "do": "wait",
+          "seconds": 1.5
+        }
+      ]
+    },
+    {
+      "page": "p4",
+      "label": "Time",
+      "shot": "full",
+      "transition": "push",
+      "title": [
+        "Watch fields",
+        "appear"
+      ],
+      "lead": "Press play and watch **four decades of research** light up, year by year.",
+      "chips": [
+        "Papers per year",
+        "Every field, in order"
+      ],
+      "steps": [
+        {
+          "do": "click",
+          "target": "e141"
+        },
+        {
+          "do": "wait",
+          "seconds": 3
+        },
+        {
+          "do": "drag",
+          "target": "e109",
+          "by": [
+            0.3,
+            0
+          ],
+          "at": [
+            0.6,
+            0.45
+          ]
+        }
+      ]
+    }
+  ],
+  "outro": {
+    "kicker": "Every paper is a star",
+    "cta": "Open source · Unihack 2026",
+    "stats": [
+      {
+        "value": "54,190",
+        "caption": "Papers mapped"
+      },
+      {
+        "value": "250M+",
+        "caption": "Searchable live"
+      },
+      {
+        "value": "15",
+        "caption": "Fields"
+      }
+    ]
+  }
+}

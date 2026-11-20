@@ -38,10 +38,10 @@ export function loadMeaning(onProgress) {
     };
     const [embed, topics, topicBin, pca, paperBin] = await Promise.all([
       pipeline('feature-extraction', MODEL, { dtype: 'q8', device: 'wasm', progress_callback }),
-      fetch('/topics.json').then(r => r.json()),
-      fetch('/topics.bin').then(r => r.arrayBuffer()),
-      fetch('/vectors.json').then(r => r.json()),
-      fetch('/vectors.bin').then(r => r.arrayBuffer()),
+      fetch(import.meta.env.BASE_URL + 'topics.json').then(r => r.json()),
+      fetch(import.meta.env.BASE_URL + 'topics.bin').then(r => r.arrayBuffer()),
+      fetch(import.meta.env.BASE_URL + 'vectors.json').then(r => r.json()),
+      fetch(import.meta.env.BASE_URL + 'vectors.bin').then(r => r.arrayBuffer()),
     ]);
     _embed = embed;
     _topics = topics;

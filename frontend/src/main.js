@@ -698,7 +698,7 @@ async function loadStars() {
 
   // 2. Static galaxy.json built by the pipeline (cached by the browser)
   try {
-    const data = await _fetchJsonWithProgress('/galaxy.json');
+    const data = await _fetchJsonWithProgress(import.meta.env.BASE_URL + 'galaxy.json');
     const stars = data.v === 2 ? _expandCompact(data) : _normaliseStars(data);
     if (stars.length) {
       console.info(`[load] Using galaxy.json: ${stars.length} stars`);

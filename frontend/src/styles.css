@@ -374,3 +374,25 @@ body.light-mode .cl-label .name { text-shadow: none; }
 @media (max-width: 600px) { .wl-uses { grid-template-columns: 1fr; } }
 #detail-lore { font-family: var(--mono); font-style: normal; font-size: 11px; line-height: 1.6; color: var(--muted); border-bottom: none; padding: 0; margin: 0; }
 #detail-lore b { color: var(--paper); font-weight: 500; }
+
+/* ── Readability fixes ─────────────────────────────────────────────────── */
+/* Side columns never shrink below their content, so the wordmark can't slide under the search bar */
+#topbar { grid-template-columns: minmax(max-content, 1fr) minmax(0, 600px) minmax(max-content, 1fr); }
+/* Panels that sit over the galaxy are near-opaque: star labels showed through their text */
+#welcome, #live-results, #detail-panel, #compare, #universe-hint { background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01)), linear-gradient(var(--panel-solid), var(--panel-solid)), var(--bg); }
+/* Dim the galaxy behind the welcome card */
+#welcome { box-shadow: var(--shadow), 0 0 0 100vmax rgba(5,5,12,0.55); }
+/* One row of suggestions, and none while results are open (they sat on the results header) */
+#query-chips { max-height: 24px; overflow: hidden; }
+#live-results:not([hidden]) ~ #query-chips { display: none; }
+@media (max-width: 1100px) { #sector { display: none; } }
+@media (max-width: 900px) {
+  #topbar { grid-template-columns: minmax(0, 1fr) auto; }
+  /* the paper replaces the results list instead of stacking on top of it */
+  body:has(#detail-panel.open) #live-results,
+  body:has(#detail-panel.open) #dock-toggle { display: none; }
+}
+@media (max-width: 600px) {
+  .wordmark { font-size: 16px; }
+  #sound-btn, #wormhole-slot, #wormhole-btn { display: none !important; }
+}

@@ -371,7 +371,13 @@ body.light-mode .cl-label .name { text-shadow: none; }
 .wl-uses b { color: var(--paper); font-weight: 500; }
 .wl-start { display: flex; flex-wrap: wrap; gap: 8px; }
 .wl-keys { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 16px; font-size: 10px; color: var(--faint); }
+.wl-credit { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 10px; color: var(--faint); }
+.wl-credit a { color: var(--gold); text-decoration: none; }
+.wl-credit a:hover { text-decoration: underline; }
 @media (max-width: 600px) { .wl-uses { grid-template-columns: 1fr; } }
+/* Touch screens get touch hints; keyboard shortcuts mean nothing on a phone */
+.k-touch { display: none; }
+@media (pointer: coarse) { .k-mouse { display: none; } .k-touch { display: revert; } }
 #detail-lore { font-family: var(--mono); font-style: normal; font-size: 11px; line-height: 1.6; color: var(--muted); border-bottom: none; padding: 0; margin: 0; }
 #detail-lore b { color: var(--paper); font-weight: 500; }
 
@@ -379,7 +385,7 @@ body.light-mode .cl-label .name { text-shadow: none; }
 /* Side columns never shrink below their content, so the wordmark can't slide under the search bar */
 #topbar { grid-template-columns: minmax(max-content, 1fr) minmax(0, 600px) minmax(max-content, 1fr); }
 /* Panels that sit over the galaxy are near-opaque: star labels showed through their text */
-#welcome, #live-results, #detail-panel, #compare, #universe-hint { background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01)), linear-gradient(var(--panel-solid), var(--panel-solid)), var(--bg); }
+#welcome, #live-results, #detail-panel, #compare, #universe-hint, #dock { background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01)), linear-gradient(var(--panel-solid), var(--panel-solid)), var(--bg); }
 /* Dim the galaxy behind the welcome card */
 #welcome { box-shadow: var(--shadow), 0 0 0 100vmax rgba(5,5,12,0.55); }
 /* One row of suggestions, and none while results are open (they sat on the results header) */

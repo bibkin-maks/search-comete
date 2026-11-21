@@ -179,7 +179,8 @@ document.getElementById('app').innerHTML = `
     <button class="btn" data-start="field">${icon.layers} Fly into Machine Learning</button>
     <button class="btn" data-start="universe">${icon.sparkle} Start from an empty sky</button>
   </div>
-  <div class="wl-keys"><span>Drag to orbit</span><span>Scroll to zoom</span><span>Click a star</span><span><span class="kbd">/</span> search</span><span><span class="kbd">H</span> home</span></div>
+  <div class="wl-keys"><span>Drag to orbit</span><span class="k-mouse">Scroll to zoom</span><span class="k-touch">Pinch to zoom</span><span class="k-mouse">Click a star</span><span class="k-touch">Tap a star</span><span class="k-mouse"><span class="kbd">/</span> search</span><span class="k-mouse"><span class="kbd">H</span> home</span></div>
+  <div class="wl-credit">Made at Unihack 2026 by Billy H, Maks and George Wei · <a href="https://github.com/bibkin-maks/search-comete" target="_blank" rel="noopener">Code on GitHub ↗</a></div>
   <button class="icon-btn" id="welcome-close" aria-label="Close">${icon.close}</button>
 </div>
 <div id="universe-hint" class="glass" hidden>
@@ -222,7 +223,8 @@ document.getElementById('app').innerHTML = `
     <button class="btn" id="universe-clear">Clear my universe</button>
   </div>
   <div class="settings-group"><div id="fps-counter">FPS: --</div></div>
-  <div class="ai-note">Drag to orbit · scroll to zoom · click a star · <span class="kbd">/</span> search · <span class="kbd">Esc</span> close</div>
+  <div class="ai-note k-mouse">Drag to orbit · scroll to zoom · click a star · <span class="kbd">/</span> search · <span class="kbd">Esc</span> close</div>
+  <div class="ai-note k-touch">Drag to orbit · pinch to zoom · tap a star</div>
 </div>
 `;
 
@@ -997,11 +999,24 @@ loadStars().then(async stars => {
   _openFromUrl(stars);
 });
 
-// ?q=… runs a search, ?paper=W… opens that paper (in the galaxy or from OpenAlex)
+// ?q=… runs a search, ?paper=W… opens that paper (in the galaxy or from OpenAlex),
+// ?paper=W…&grow=1 also grows its citation tree, so a shared link shows the tree without a click
 async function _openFromUrl(stars) {
   const params = new URLSearchParams(location.search);
   const q = params.get('q');
   const paperId = params.get('paper');
+  const grow = params.get('grow') === '1';
+  const growSoon = () => {
+    if (!grow) return;
+    setTimeout(() => {
+      document.getElementById('grow-btn')?.click();
+      // On a phone the paper card covers the screen, so step it aside and let the tree be seen
+      if (window.matchMedia('(max-width: 700px)').matches) {
+        closeDetail();
+        _toast('Growing the citation tree: older papers it builds on sit below, newer papers citing it rise above. Tap any star to open it.', 7000);
+      }
+    }, 1200);
+  };
 
   if (q) {
     document.getElementById('search-input').value = q;
@@ -1013,10 +1028,11 @@ async function _openFromUrl(stars) {
     if (star) {
       const pos = getRemappedPos(id);
       if (pos) flyTo(pos);
-      setTimeout(() => showDetail(star), q ? 900 : 0);
+      setTimeout(() => { showDetail(star); growSoon(); }, q ? 900 : 0);
     } else {
       try {
         showDetail(await getWork(id));
+        growSoon();
       } catch (e) {
         console.warn('[url] could not open paper', paperId, e.message);
       }

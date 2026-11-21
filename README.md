@@ -42,7 +42,7 @@ npm run dev          # http://localhost:5173
 That's all: the site is static. `npm run build` gives a folder you can drop on Vercel, Netlify or GitHub Pages.
 
 **Controls:** drag to orbit · scroll to zoom · click a star · <kbd>/</kbd> search · <kbd>H</kbd> back to the whole galaxy · <kbd>?</kbd> help · <kbd>Esc</kbd> close.
-Links are shareable: `?q=protein+folding`, `?paper=W2163605009`, `?mode=universe`.
+Links are shareable: `?q=protein+folding`, `?paper=W2163605009`, `?mode=universe`. Add `&grow=1` to a paper link and its citation tree grows as the page opens.
 
 ## How it works
 
